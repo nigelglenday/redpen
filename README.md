@@ -100,6 +100,12 @@ anything.
 
 See [`examples/deliver-tmux`](examples/deliver-tmux) for a working one.
 
+**The overlay never prints.** A PDF of the page is the deliverable; the tab,
+drawer and pins are scaffolding for reviewing it. If you script the print,
+render from the file rather than through redpen: the overlay polls for work
+coming back, so `chrome --headless --print-to-pdf` against a served page writes
+the PDF and then does not exit.
+
 ## Everything else
 
 ```
