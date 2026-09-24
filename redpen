@@ -1,0 +1,1200 @@
+#!/usr/bin/env python3
+# tool: redpen. Serve any HTML with a comment overlay; Nigel marks it up and the comments come back to the agent as structured data. `redpen <dir> --port 8801` then `show 8801 --path /x.html`. Was called `annotate`.
+"""Serve a directory with an annotation overlay, and collect comments as files.
+
+    redpen <dir> [--port 8801]
+
+Why this exists: an agent builds a page and serves it; you look at it and want to
+say "this heading is wrong" about a specific thing. Screenshots into a bug tracker
+are the usual answer, but an agent does not want a picture. It wants the node.
+So an annotation here carries the selected text, a CSS selector, the element's own
+HTML and its position, and the agent goes straight to it.
+
+How it fits together:
+
+    agent (server)          redpen <dir> --port 8801        serves + collects
+    you (laptop)            peek 8765                      tunnels + opens
+    you (browser)           select text, or drag a box, then comment
+    agent (server)          reads <dir>/.annotations/*.json
+
+Binds 127.0.0.1 by default: the page material and your comments stay on the machine
+serving them, which is the machine the agent is on, so nothing is copied back.
+
+Interactions:
+  - Select text, then press A (or right-click) to comment on the selection.
+  - Hold Shift and drag to lasso a region, then comment on what it covers.
+  - Esc cancels.
+"""
+
+import argparse
+import http.server
+import json
+import os
+import re
+import socketserver
+import urllib.parse
+import shlex
+import shutil
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+OVERLAY = r"""
+<script>
+(function () {
+  if (window.__annotateLoaded) return;
+  window.__annotateLoaded = true;
+
+  // Same-origin when injected by this server; absolute when a bookmarklet loaded
+  // us onto someone else's page, derived from where this script came from.
+  var ENDPOINT = '/__annotate';
+  try {
+    var me = document.currentScript && document.currentScript.src;
+    if (me) ENDPOINT = new URL('/__annotate', me).href;
+  } catch (e) {}
+  var box = null, start = null, modal = null, pending = null;
+  setTimeout(function () { try { loadDrawer(); } catch (e) {} }, 300);
+
+  var css = document.createElement('style');
+  css.textContent = [
+    '.__ann-box{position:absolute;border:2px solid #e11;background:rgba(238,17,17,.08);z-index:2147483646;pointer-events:none}',
+    '.__ann-modal{position:fixed;z-index:2147483647;background:#fff;border:1px solid #ccc;border-radius:8px;',
+    '  box-shadow:0 8px 32px rgba(0,0,0,.25);padding:12px;width:320px;font:14px system-ui}',
+    '.__ann-modal textarea{width:100%;height:76px;font:14px system-ui;border:1px solid #ccc;border-radius:4px;padding:6px;box-sizing:border-box}',
+    '.__ann-modal .__ann-ctx{font:12px system-ui;color:#666;margin-bottom:6px;max-height:34px;overflow:hidden}',
+    '.__ann-modal button{font:14px system-ui;padding:5px 12px;border-radius:5px;border:1px solid #bbb;background:#f6f6f6;cursor:pointer}',
+    '.__ann-modal button.__ann-set{background:#f6f6f6}',
+    '.__ann-modal button.__ann-send{background:#111;color:#fff;border-color:#111}',
+    '.__ann-drawer{position:fixed;top:0;right:0;width:340px;height:100vh;z-index:2147483645;',
+    '  background:#fff;border-left:1px solid #ddd;box-shadow:-6px 0 24px rgba(0,0,0,.14);',
+    '  font:13px system-ui;display:flex;flex-direction:column;transform:translateX(100%);',
+    '  transition:transform .18s ease}',
+    '.__ann-drawer.__ann-open{transform:none}',
+    '.__ann-drawer h4{margin:0;padding:12px 14px;border-bottom:1px solid #eee;font-size:13px;',
+    '  display:flex;align-items:center;gap:8px}',
+    '.__ann-drawer h4 span{color:#888;font-weight:400}',
+    '.__ann-drawer .__ann-to{padding:7px 14px;border-bottom:1px solid #eee;color:#666;font-size:12px}',
+    '.__ann-drawer h4 .__ann-close{margin-left:auto;border:none;background:none;font-size:20px;',
+    '  line-height:1;color:#999;cursor:pointer;padding:0 2px}',
+    '.__ann-drawer h4 .__ann-close:hover{color:#111}',
+    '.__ann-drawer .__ann-age{color:#999}',
+    '.__ann-stale{padding:8px 14px;background:#fff4d6;border-bottom:1px solid #f0e0b0;',
+    '  color:#7a5b00;font-size:12px;line-height:1.35}',
+    '.__ann-tab.__ann-stale-tab{background:#fff4d6;border-color:#e3c97a}',
+    '.__ann-opts{display:flex;align-items:center;gap:12px;padding:8px 14px;',
+    '  border-bottom:1px solid #eee;font-size:12px;color:#666}',
+    '.__ann-opts select{font:12px system-ui;border:1px solid #ddd;border-radius:4px;padding:2px 4px}',
+    '.__ann-opts label{display:flex;align-items:center;gap:5px}',
+    '.__ann-group-h{padding:9px 14px 4px;font:600 11px system-ui;color:#888;',
+    '  text-transform:uppercase;letter-spacing:.06em;background:#fafafa;',
+    '  border-bottom:1px solid #f0f0f0}',
+    '.__ann-drawer .__ann-list{overflow:auto;flex:1;padding:6px 0}',
+    '.__ann-bar{border-top:1px solid #eee;padding:10px 14px;display:flex;align-items:center;',
+    '  gap:10px;background:#fafafa}',
+    '.__ann-bar label{color:#666;font-size:12px;display:flex;align-items:center;gap:5px}',
+    '.__ann-bar button{margin-left:auto;font:12px system-ui;padding:5px 14px;border-radius:5px;',
+    '  border:1px solid #111;background:#111;color:#fff;cursor:pointer}',
+    '.__ann-bar button:disabled{background:#ddd;border-color:#ddd;color:#888;cursor:default}',
+    '.__ann-item{display:grid;grid-template-columns:auto 1fr auto;gap:0 9px;align-items:start}',
+    '.__ann-item .__m{grid-column:2/4}',
+    '.__ann-one{font:11px system-ui;padding:2px 8px;border-radius:4px;border:1px solid #ccc;',
+    '  background:#fafafa;cursor:pointer;opacity:0;transition:opacity .12s}',
+    '.__ann-item:hover .__ann-one{opacity:1}',
+    '.__ann-bar.__ann-none{opacity:.55}',
+    '.__ann-brand{display:flex;align-items:center;gap:6px;padding:8px 14px 10px;',
+    '  border-top:1px solid #f0f0f0;background:#fff}',
+    '.__ann-brand svg{width:15px;height:15px;fill:#e11;stroke:none}',
+    '.__ann-brand svg .__nib{fill:none;stroke:#fff;stroke-width:1.6}',
+    '.__ann-brand span{font:600 12px system-ui;letter-spacing:.02em;color:#e11}',
+    '.__ann-brand em{font:400 11px system-ui;font-style:normal;color:#aaa;margin-left:auto}',
+    '.__ann-item .__ann-pick{margin-top:2px}',
+    '.__ann-item.__done{grid-template-columns:1fr}',
+    '.__ann-item{padding:9px 14px;border-bottom:1px solid #f2f2f2}',
+    '.__ann-item .__c{color:#111;line-height:1.35}',
+    '.__ann-item .__m{color:#999;font-size:11px;margin-top:3px}',
+    '.__ann-item.__done .__c{color:#999;text-decoration:line-through}',
+    '.__ann-item button{font:11px system-ui;padding:2px 8px;margin-top:5px;border-radius:4px;',
+    '  border:1px solid #ccc;background:#fafafa;cursor:pointer}',
+    '.__ann-pin{position:absolute;z-index:2147483643;display:flex;align-items:center;gap:1px;',
+    '  padding:2px 5px 2px 3px;border-radius:9px;background:#fff;border:1px solid #e11;',
+    '  cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.22);transform:translate(-6px,-24px)}',
+    '.__ann-pin svg{width:12px;height:12px;fill:#e11}',
+    '.__ann-pin b{font:600 10px/1 system-ui;color:#e11}',
+    '.__ann-pin.__done{border-color:#b9c0cc;opacity:.75;box-shadow:none}',
+    '.__ann-pin.__done svg{fill:#98a2b3}  .__ann-pin.__done b{color:#98a2b3}',
+    '.__ann-pin:hover{box-shadow:0 0 0 3px rgba(238,17,17,.18),0 2px 6px rgba(0,0,0,.22)}',
+    /* Right edge, vertically centred. Top-right collides with whatever the */
+    /* page puts there: on the RMC proposal it sat on top of Print. */
+    '.__ann-tab{position:fixed;top:50%;right:0;transform:translateY(-50%);',
+    '  z-index:2147483644;font:11px system-ui;letter-spacing:.04em;',
+    '  padding:10px 7px;border-radius:8px 0 0 8px;border:1px solid #ddd;border-right:none;',
+    '  background:#fff;cursor:pointer;box-shadow:-2px 0 10px rgba(0,0,0,.10);',
+    '  writing-mode:vertical-rl;text-orientation:mixed}',
+    '.__ann-tab:hover{background:#fafafa}',
+    '.__ann-refresh{position:fixed;left:50%;bottom:20px;transform:translate(-50%,140%);',
+    '  z-index:2147483646;background:#111;color:#fff;border-radius:8px;padding:9px 10px 9px 14px;',
+    '  font:13px system-ui;display:flex;align-items:center;gap:12px;transition:transform .2s;',
+    '  box-shadow:0 6px 20px rgba(0,0,0,.3)}',
+    '.__ann-refresh.__ann-show{transform:translate(-50%,0)}',
+    '.__ann-refresh button{font:12px system-ui;padding:4px 12px;border-radius:5px;border:none;',
+    '  background:#fff;color:#111;cursor:pointer}',
+    '.__ann-toast{position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#111;color:#fff;',
+    '  padding:8px 14px;border-radius:6px;font:13px system-ui;opacity:.95}',
+    '.__ann-hint{position:fixed;bottom:16px;left:16px;z-index:2147483645;background:rgba(0,0,0,.72);color:#fff;',
+    '  padding:6px 10px;border-radius:6px;font:12px system-ui}'
+  ].join('\n');
+  document.head.appendChild(css);
+
+  var hint = document.createElement('div');
+  hint.className = '__ann-hint';
+  hint.textContent = 'select text + A  ·  \u2325 option-click anything  ·  shift-drag a box  ·  esc cancels';
+  document.body.appendChild(hint);
+  setTimeout(function(){ hint.style.transition='opacity .6s'; hint.style.opacity='0'; }, 6000);
+
+  // A selector stable enough for an agent to find the node again. id wins; then
+  // a short nth-of-type path. Not bulletproof on a page that rerenders, which is
+  // why the element's own HTML is sent too.
+  function selectorFor(el) {
+    if (!el || el.nodeType !== 1) return null;
+    if (el.id) return '#' + el.id;
+    var parts = [];
+    while (el && el.nodeType === 1 && parts.length < 6) {
+      var part = el.tagName.toLowerCase();
+      if (el.id) { parts.unshift('#' + el.id); break; }
+      var p = el.parentElement;
+      if (p) {
+        var sibs = Array.prototype.filter.call(p.children, function (c) { return c.tagName === el.tagName; });
+        if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(el) + 1) + ')';
+      }
+      parts.unshift(part);
+      el = el.parentElement;
+      if (el === document.body) { parts.unshift('body'); break; }
+    }
+    return parts.join(' > ');
+  }
+
+  function isOurs(el) {
+    // The overlay's own nodes must never be reported as page content: the lasso
+    // box exactly covers the region the user drew, so without this it always
+    // wins the outermost-element test and the agent gets __ann-box back.
+    return !!(el.closest && el.closest(
+      '.__ann-box, .__ann-modal, .__ann-hint, .__ann-toast, ' +
+      '.__ann-drawer, .__ann-tab, .__ann-pin, .__ann-refresh'));
+  }
+
+  function elementsIn(rect) {
+    var out = [], all = document.body.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      if (isOurs(all[i])) continue;
+      var r = all[i].getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (r.left >= rect.left - 2 && r.top >= rect.top - 2 &&
+          r.right <= rect.right + 2 && r.bottom <= rect.bottom + 2) {
+        // Keep only the outermost: a container already covers its children.
+        if (!out.some(function (o) { return o.contains(all[i]); })) out.push(all[i]);
+      }
+    }
+    return out.slice(0, 8);
+  }
+
+  function closeModal() {
+    if (modal) { modal.remove(); modal = null; }
+    if (box) { box.remove(); box = null; }
+    pending = null;
+  }
+
+  function toast(msg, ok) {
+    var t = document.createElement('div');
+    t.className = '__ann-toast';
+    t.textContent = msg;
+    if (!ok) t.style.background = '#a00';
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 2600);
+  }
+
+  function openModal(x, y, context) {
+    closeModalKeepBox();
+    pending = context;
+    modal = document.createElement('div');
+    modal.className = '__ann-modal';
+    modal.style.left = Math.min(x, window.innerWidth - 340) + 'px';
+    modal.style.top = Math.min(y, window.innerHeight - 190) + 'px';
+    var ctx = (context.selected_text || context.element_text || '').slice(0, 160);
+    modal.innerHTML =
+      '<div class="__ann-ctx">' + (ctx ? '“' + ctx.replace(/</g, '&lt;') + '”' : context.selector || '') + '</div>' +
+      '<textarea placeholder="comment…   enter saves   \u2325 enter processes"></textarea>' +
+      '<div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">' +
+      '<button class="__ann-cancel">cancel</button>' +
+      '<button class="__ann-set" title="save it and keep reading (enter)">save</button>' +
+      '<button class="__ann-send" title="save and process it now (\u2325 enter)">process</button></div>';
+    document.body.appendChild(modal);
+    var ta = modal.querySelector('textarea');
+    ta.focus();
+    modal.querySelector('.__ann-cancel').onclick = closeModal;
+    modal.querySelector('.__ann-set').onclick = function () { submit(ta.value, false); };
+    modal.querySelector('.__ann-send').onclick = function () { submit(ta.value, true); };
+    ta.addEventListener('keydown', function (e) {
+      // One modifier for the whole tool: OPTION. Option-click opens a
+      // comment, option-enter processes it. Enter alone saves, because that is
+      // the common case. Shift-enter is a newline. Cmd-enter is kept as an
+      // alias only because it is muscle memory from everywhere else.
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        submit(ta.value, e.altKey || e.metaKey || e.ctrlKey);
+      }
+      if (e.key === 'Escape') closeModal();
+    });
+  }
+  function closeModalKeepBox() { if (modal) { modal.remove(); modal = null; } }
+
+  function submit(text, send) {
+    if (!text || !text.trim()) { toast('empty comment, not sent', false); return; }
+    var payload = Object.assign({}, pending, {
+      send: !!send,
+      comment: text.trim(),
+      url: location.href,
+      title: document.title,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      scroll: { x: window.scrollX, y: window.scrollY },
+      at: new Date().toISOString()
+    });
+    fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      if (!r.ok) { toast('save failed: ' + r.status, false); return; }
+      return r.json().then(function (d) {
+        if (!send) { toast('saved', true); }
+        else { toast(describe(d), d.delivered || !!d.queued); }
+        loadDrawer();
+      });
+    }).catch(function (e) { toast('save failed: ' + e.message, false); });
+    closeModal();
+  }
+
+  // ---- pins on the page ------------------------------------------------
+  // Anchored by SELECTOR first, because the page may have re-rendered since
+  // the comment was left and the saved rect would then point at empty space.
+  // The rect is the fallback, converted back to page coordinates using the
+  // scroll position recorded at the time.
+  function placePins(items) {
+    Array.prototype.forEach.call(document.querySelectorAll('.__ann-pin'),
+      function (p) { p.remove(); });
+    items.forEach(function (a, i) {
+      var x = null, y = null, el = null;
+      if (a.selector) { try { el = document.querySelector(a.selector); } catch (e) {} }
+      if (el) {
+        var r = el.getBoundingClientRect();
+        if (r.width || r.height) { x = r.left + window.scrollX; y = r.top + window.scrollY; }
+      }
+      if (x === null && a.rect) {
+        x = (a.rect.x || 0) + ((a.scroll && a.scroll.x) || 0);
+        y = (a.rect.y || 0) + ((a.scroll && a.scroll.y) || 0);
+      }
+      if (x === null) return;                       // nothing to anchor to
+      var pin = document.createElement('div');
+      pin.className = '__ann-pin' + (a.done ? ' __done' : '');
+      pin.innerHTML =
+        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+        '<path d="M15.6 3.6l4.8 4.8-10.2 10.2-6 1.2 1.2-6z"/></svg>' +
+        '<b>' + (i + 1) + '</b>';
+      pin.style.left = Math.max(2, x) + 'px';
+      pin.style.top = Math.max(24, y) + 'px';
+      pin.title = (a.done ? 'done: ' : '') + (a.comment || '');
+      pin.onclick = function (ev) {
+        ev.stopPropagation();                       // never advance a deck
+        ensureDrawer();
+        drawer.classList.add('__ann-open');
+        // Match by file, not by index: the drawer is grouped by page, so its
+        // order no longer lines up with the pins.
+        var cb = drawer.querySelector('.__ann-pick[data-file="' + a.file + '"]');
+        var row = cb ? cb.parentElement : null;
+        if (row) {
+          row.scrollIntoView({ block: 'center' });
+          row.style.background = '#fffbdd';
+          setTimeout(function () { row.style.background = ''; }, 1200);
+        }
+      };
+      document.body.appendChild(pin);
+    });
+  }
+
+  // ---- comment drawer --------------------------------------------------
+  // Pending vs done is read straight off the filesystem: the agent moves a
+  // file into .annotations/done/ when it has acted on it, which is the
+  // convention already in use. No status protocol to keep in sync.
+  var drawer = null, tab = null;
+  var prefs = { group: 'page', showDone: false };
+  try { Object.assign(prefs, JSON.parse(localStorage.getItem('__ann_prefs') || '{}')); } catch (e) {}
+  function savePrefs() {
+    try { localStorage.setItem('__ann_prefs', JSON.stringify(prefs)); } catch (e) {}
+  }
+
+  function ensureDrawer() {
+    if (drawer) return;
+    tab = document.createElement('button');
+    tab.className = '__ann-tab';
+    tab.textContent = 'comments';
+    tab.onclick = function () {
+      drawer.classList.toggle('__ann-open');
+      if (drawer.classList.contains('__ann-open')) loadDrawer();
+    };
+    document.body.appendChild(tab);
+
+    drawer = document.createElement('div');
+    drawer.className = '__ann-drawer';
+    drawer.innerHTML =
+      '<h4>Comments <span class="__ann-count"></span>' +
+      '<button class="__ann-close" title="close">×</button></h4>' +
+      '<div class="__ann-to">goes to <b class="__ann-agent">…</b>' +
+      '<span class="__ann-age"></span></div>' +
+      '<div class="__ann-stale" hidden>This server is running older code than ' +
+      'what is installed. Restart it or you are commenting on a stale build.</div>' +
+      '<div class="__ann-opts">' +
+      '<select class="__ann-group"><option value="page">by page</option>' +
+      '<option value="recent">most recent</option></select>' +
+      '<label><input type="checkbox" class="__ann-showdone"> show processed</label>' +
+      '<label title="plain left-click adds a comment, no option key needed">' +
+      '<input type="checkbox" class="__ann-clickmode"> click to comment</label>' +
+      '</div>' +
+      '<div class="__ann-list"></div>' +
+      '<div class="__ann-bar">' +
+      '<label><input type="checkbox" class="__ann-all" checked> all</label>' +
+      '<button class="__ann-send-sel">process</button></div>' +
+      '<div class="__ann-brand">' +
+      '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+      '<path d="M15.6 3.6l4.8 4.8-10.2 10.2-6 1.2 1.2-6z"/>' +
+      '<path d="M14.1 5.1l4.8 4.8" class="__nib"/></svg>' +
+      '<span>redpen</span><em class="__ann-ver"></em></div>';
+    document.body.appendChild(drawer);
+    drawer.querySelector('.__ann-close').onclick = function () {
+      drawer.classList.remove('__ann-open');
+    };
+    var g = drawer.querySelector('.__ann-group');
+    g.value = prefs.group;
+    g.onchange = function (e) { prefs.group = e.target.value; savePrefs(); loadDrawer(); };
+    var cm = drawer.querySelector('.__ann-clickmode');
+    cm.onchange = function (e) {
+      commentMode = e.target.checked;
+      document.documentElement.style.cursor = commentMode ? 'crosshair' : '';
+    };
+    var sd = drawer.querySelector('.__ann-showdone');
+    sd.checked = prefs.showDone;
+    sd.onchange = function (e) { prefs.showDone = e.target.checked; savePrefs(); loadDrawer(); };
+    drawer.querySelector('.__ann-all').onchange = function (e) {
+      Array.prototype.forEach.call(drawer.querySelectorAll('.__ann-pick'),
+        function (c) { c.checked = e.target.checked; });
+      updateBar();
+    };
+    drawer.querySelector('.__ann-send-sel').onclick = function () {
+      var files = Array.prototype.filter.call(drawer.querySelectorAll('.__ann-pick'),
+        function (c) { return c.checked; }).map(function (c) { return c.dataset.file; });
+      if (!files.length) { toast('nothing selected', false); return; }
+      processFiles(files);
+    };
+
+  }
+
+  // Module scope, not inside ensureDrawer: loadDrawer calls it, and a
+  // ReferenceError there is swallowed by the fetch .catch, so the rows simply
+  // never render and nothing says why.
+  function updateBar() {
+    if (!drawer) return;
+    var n = drawer.querySelectorAll('.__ann-pick:checked').length;
+    var b = drawer.querySelector('.__ann-send-sel');
+    if (!b) return;
+    var open = drawer.querySelectorAll('.__ann-pick').length;
+    b.textContent = n ? ('process ' + n) : 'process';
+    b.disabled = !n || !open;
+    drawer.querySelector('.__ann-all').disabled = !open;
+  }
+
+  // One place decides what a send outcome reads like. Queued is a normal
+  // state, not an error: the agent is busy and it will go when it is free.
+  function describe(d) {
+    var who = d.agent || 'the agent';
+    if (d.delivered) return 'processing ' + (d.count || 1) + ' with ' + who;
+    if (d.queued) return 'queued for ' + who + ' (' + d.queued +
+      (d.queued === 1 ? ' waiting)' : ' waiting)') + ', it is busy';
+    return 'could not reach ' + who + ': ' + (d.why || 'unknown');
+  }
+
+  function processFiles(files) {
+    return fetch(ENDPOINT + '?action=send', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: files }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        toast(describe(d), d.delivered || !!d.queued);
+        loadDrawer();
+      });
+  }
+
+  // Poll for work coming back. NEVER reload on its own: a reload would throw
+  // away a comment half typed in the modal. Say so and let him choose.
+  var lastDone = null, banner = null;
+  function noticeProcessed(d) {
+    var n = (d.done || []).length;
+    if (lastDone !== null && n > lastDone) showRefresh(n - lastDone);
+    lastDone = n;
+  }
+  function showRefresh(k) {
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = '__ann-refresh';
+      banner.innerHTML = '<span></span><button>refresh</button>';
+      banner.querySelector('button').onclick = function () { location.reload(); };
+      document.body.appendChild(banner);
+    }
+    banner.querySelector('span').textContent =
+      k + (k === 1 ? ' comment processed.' : ' comments processed.') +
+      ' The page may have been rebuilt.';
+    banner.classList.add('__ann-show');
+  }
+  setInterval(function () {
+    fetch(ENDPOINT + '?action=list').then(function (r) { return r.json(); })
+      .then(function (d) {
+        noticeProcessed(d);
+        // Only redraw the drawer when nothing is being typed into it.
+        if (!modal) { try { renderDrawer(d); } catch (e) {} }
+      }).catch(function () {});
+  }, 10000);
+
+  function loadDrawer() {
+    ensureDrawer();
+    fetch(ENDPOINT + '?action=list').then(function (r) { return r.json(); })
+      .then(function (d) { noticeProcessed(d); renderDrawer(d); })
+      .catch(function (e) { try { console.error('redpen drawer:', e); } catch (x) {} });
+  }
+
+  // Split out so the poll can redraw without refetching through loadDrawer.
+  function renderDrawer(d) {
+    ensureDrawer();
+    {
+        var list = drawer.querySelector('.__ann-list');
+        var n = (d.pending || []).length;
+        drawer.querySelector('.__ann-count').textContent =
+          n + ' open, ' + (d.done || []).length + ' processed';
+        tab.textContent = n ? ('comments (' + n + ')') : 'comments';
+        // Say how old this server is, and shout if it predates the installed
+        // binary. A stale server otherwise looks exactly like a current one.
+        var age = drawer.querySelector('.__ann-age');
+        if (d.started) {
+          var mins = Math.max(0, Math.round((Date.now() / 1000 - d.started) / 60));
+          age.textContent = ' · up ' + (mins < 60 ? mins + 'm'
+            : (Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm'));
+        }
+        var ver = drawer.querySelector('.__ann-ver');
+        if (ver && d.version) {
+          var mins = d.started ? Math.round((Date.now() / 1000 - d.started) / 60) : null;
+          ver.textContent = 'v' + d.version + (mins !== null ? ' · up ' +
+            (mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h') : '');
+        }
+        drawer.querySelector('.__ann-stale').hidden = !d.stale;
+        if (d.stale) tab.classList.add('__ann-stale-tab');
+        var who = drawer.querySelector('.__ann-agent');
+        who.textContent = d.agent || 'nobody — no agent owns this folder';
+        who.style.color = d.agent ? '#111' : '#b00';
+        // Always visible, disabled when there is nothing open, so the footer
+        // does not appear and disappear under the cursor.
+        drawer.querySelector('.__ann-bar').classList.toggle('__ann-none', !n);
+        list.innerHTML = '';
+        var items = (d.pending || []).concat(prefs.showDone ? (d.done || []) : []);
+
+        function row(a) {
+          var el = document.createElement('div');
+          el.className = '__ann-item' + (a.done ? ' __done' : '');
+          el.innerHTML = (a.done ? '' :
+              '<input type="checkbox" class="__ann-pick" checked>') +
+            '<div class="__c"></div>' +
+            (a.done ? '' : '<button class="__ann-one" title="process just this one">process</button>') +
+            '<div class="__m"></div>';
+          var cb = el.querySelector('.__ann-pick');
+          if (cb) { cb.dataset.file = a.file; cb.onchange = updateBar; }
+          var one = el.querySelector('.__ann-one');
+          if (one) one.onclick = function (ev) { ev.stopPropagation(); processFiles([a.file]); };
+          el.querySelector('.__c').textContent = a.comment || '(no text)';
+          el.querySelector('.__m').textContent =
+            (a.done ? 'processed · ' : '') + (a.selected_text || a.selector || '').slice(0, 70);
+          return el;
+        }
+
+        if (prefs.group === 'page') {
+          // One heading per page, because a comment's page is the thing you
+          // are actually working through.
+          var byPage = {}, order = [];
+          items.forEach(function (a) {
+            var k = 'this page';
+            try { k = new URL(a.url || location.href).pathname || '/'; } catch (e) {}
+            if (!byPage[k]) { byPage[k] = []; order.push(k); }
+            byPage[k].push(a);
+          });
+          order.sort();
+          order.forEach(function (k) {
+            var h = document.createElement('div');
+            h.className = '__ann-group-h';
+            h.textContent = k + '  (' + byPage[k].filter(function (x) { return !x.done; }).length + ')';
+            list.appendChild(h);
+            byPage[k].forEach(function (a) { list.appendChild(row(a)); });
+          });
+        } else {
+          items.forEach(function (a) { list.appendChild(row(a)); });
+        }
+
+        if (!list.children.length) list.innerHTML =
+          '<div class="__ann-item __m">no comments yet</div>';
+        // Only this page's comments get pins. A comment left on another
+        // document has a rect that means nothing here, and resolved pins are
+        // clutter once the work is done.
+        placePins(items.filter(function (a) {
+          if (!a.url) return true;
+          try { return new URL(a.url).pathname === location.pathname; }
+          catch (e) { return true; }
+        }));
+        updateBar();
+    }
+  }
+
+  // Comment on a PLACE rather than on selected text: wanting a bullet added
+  // somewhere has nothing to highlight.
+  //
+  // Not right-click. That took Chrome's own context menu away, so inspect and
+  // open-in-new-tab stopped working on the page being reviewed, which is too
+  // much to charge for a convenience. Alt-click always works, and comment mode
+  // turns plain left-click into a comment for a run of them.
+  var commentMode = false;
+
+  function commentOnElement(el, x, y) {
+    if (!el || isOurs(el)) return;
+    var r = el.getBoundingClientRect();
+    openModal(x, y + 8, {
+      kind: 'point',
+      selected_text: '',
+      element_text: (el.innerText || '').trim().slice(0, 160),
+      selector: selectorFor(el),
+      element_html: (el.outerHTML || '').slice(0, 2000),
+      rect: { x: Math.round(x), y: Math.round(r.top),
+              w: Math.round(r.width), h: Math.round(r.height) }
+    });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (modal || isOurs(e.target)) return;
+    if (!e.altKey && !commentMode) return;
+    // In comment mode a click is for us, so stop the page acting on it.
+    e.preventDefault();
+    e.stopPropagation();
+    // If text is selected, comment on the SELECTION. Alt-click then does the
+    // same job the A key does, and the same job right-click used to, without
+    // taking the browser's menu.
+    var sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim()) {
+      var range = sel.getRangeAt(0), rr = range.getBoundingClientRect();
+      var se = range.commonAncestorContainer;
+      if (se.nodeType !== 1) se = se.parentElement;
+      if (se && !isOurs(se)) {
+        openModal(rr.left, rr.bottom + 8, {
+          kind: 'selection',
+          selected_text: sel.toString().trim().slice(0, 2000),
+          selector: selectorFor(se),
+          element_html: (se.outerHTML || '').slice(0, 2000),
+          rect: { x: Math.round(rr.left), y: Math.round(rr.top),
+                  w: Math.round(rr.width), h: Math.round(rr.height) }
+        });
+        return;
+      }
+    }
+    var el = e.target.nodeType === 1 ? e.target : e.target.parentElement;
+    commentOnElement(el, e.clientX, e.clientY);
+  }, true);
+
+  // Text selection -> press A
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { closeModal(); return; }
+    if (modal) return;
+    if (e.key !== 'a' && e.key !== 'A') return;
+    var tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+    var sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+    e.preventDefault();
+    var range = sel.getRangeAt(0);
+    var r = range.getBoundingClientRect();
+    var el = range.commonAncestorContainer;
+    if (el.nodeType !== 1) el = el.parentElement;
+    openModal(r.left, r.bottom + 8, {
+      kind: 'selection',
+      selected_text: sel.toString().trim().slice(0, 2000),
+      selector: selectorFor(el),
+      element_html: (el.outerHTML || '').slice(0, 2000),
+      rect: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }
+    });
+  });
+
+  // Shift-drag -> box
+  document.addEventListener('mousedown', function (e) {
+    if (!e.shiftKey || modal) return;
+    e.preventDefault();
+    start = { x: e.clientX, y: e.clientY };
+    box = document.createElement('div');
+    box.className = '__ann-box';
+    document.body.appendChild(box);
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (!start || !box) return;
+    var x = Math.min(e.clientX, start.x), y = Math.min(e.clientY, start.y);
+    var w = Math.abs(e.clientX - start.x), h = Math.abs(e.clientY - start.y);
+    box.style.left = (x + window.scrollX) + 'px'; box.style.top = (y + window.scrollY) + 'px';
+    box.style.width = w + 'px'; box.style.height = h + 'px';
+  });
+  document.addEventListener('mouseup', function (e) {
+    if (!start) return;
+    var rect = {
+      left: Math.min(e.clientX, start.x), top: Math.min(e.clientY, start.y),
+      right: Math.max(e.clientX, start.x), bottom: Math.max(e.clientY, start.y)
+    };
+    start = null;
+    if (rect.right - rect.left < 8 || rect.bottom - rect.top < 8) { if (box) { box.remove(); box = null; } return; }
+    if (box) box.style.display = 'none';      // measure the page, not our own box
+    var els = elementsIn(rect);
+    if (box) box.style.display = '';
+    openModal(rect.right + 8, rect.top, {
+      kind: 'region',
+      selector: els.length ? selectorFor(els[0]) : null,
+      selectors: els.map(selectorFor),
+      element_text: els.map(function (x) { return (x.innerText || '').trim().slice(0, 200); })
+                       .filter(Boolean).join(' | ').slice(0, 600),
+      element_html: els.length ? (els[0].outerHTML || '').slice(0, 2000) : null,
+      rect: { x: Math.round(rect.left), y: Math.round(rect.top),
+              w: Math.round(rect.right - rect.left), h: Math.round(rect.bottom - rect.top) }
+    });
+  });
+
+  // Right-click is left alone entirely. It used to open a comment whenever
+  // text was selected, which is precisely when Copy and Search are wanted, so
+  // the page under review lost its own menu. Alt-click and comment mode cover
+  // this without taking anything away.
+
+})();
+</script>
+"""
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    root = None
+    outdir = None
+    served_dir = None
+    on_send = None      # command run when he presses send
+    target_name = None  # who that reaches, shown in the drawer
+    proxy = None   # when set, serve someone else's app and inject into its HTML
+
+    def log_message(self, fmt, *args):  # quieter than the default
+        # args[0] is not always a string: log_error passes an HTTPStatus.
+        first = str(args[0]) if args else ""
+        if "__annotate" in first:
+            sys.stderr.write("  %s\n" % (fmt % args))
+
+    def _annotations(self):
+        """Pending and done, newest first. Done is simply the done/ subfolder,
+        which is where an agent moves a file once it has acted on it."""
+        def read(d, done):
+            out = []
+            if not d.is_dir():
+                return out
+            for f in sorted(d.glob("*.json"), reverse=True):
+                try:
+                    rec = json.loads(f.read_text())
+                except Exception:
+                    continue
+                rec["file"] = f.name
+                rec["done"] = done
+                out.append(rec)
+            return out
+        return read(self.outdir, False), read(self.outdir / "done", True)
+
+    def _json(self, obj, code=200):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        # "send all": wake the agent for everything still pending.
+        if self.path.startswith("/__annotate?action=send"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                body = {}
+            pending, _ = self._annotations()
+            # A subset if the drawer named files, otherwise everything open.
+            want = set(body.get("files") or [])
+            chosen = [a for a in pending if a["file"] in want] if want else pending
+            names = [a["file"] for a in chosen]
+            ok, why, who = (_deliver(self.served_dir, self.outdir, len(chosen),
+                                     names, self.on_send)
+                            if chosen else (False, "nothing selected", None))
+            queued = 0
+            if ok is None:                      # not now: stack them up
+                queued = _queue_add(names)
+                ok = False
+            elif ok:
+                _queue_clear(names)
+            return self._json({"delivered": ok, "queued": queued, "why": why,
+                               "count": len(chosen),
+                               "agent": who or self.target_name})
+        if self.path != "/__annotate":
+            self.send_error(404)
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n) or b"{}")
+        except Exception as e:
+            self.send_error(400, str(e))
+            return
+
+        self.outdir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        # A slug from the comment makes the directory readable at a glance.
+        slug = re.sub(r"[^a-z0-9]+", "-", data.get("comment", "")[:40].lower()).strip("-") or "note"
+        path = self.outdir / f"{stamp}-{slug}.json"
+        i = 2
+        while path.exists():
+            path = self.outdir / f"{stamp}-{slug}-{i}.json"
+            i += 1
+        # Stamp who this belongs to AT SAVE TIME. Ownership computed only at
+        # send time is lost the moment a push fails, and a comment with no
+        # recorded owner cannot be found by the agent that should action it.
+        # The push below is then best effort: failing it costs latency, not
+        # the comment.
+        if self.target_name and not data.get("agent"):
+            data["agent"] = self.target_name
+
+        # And WHICH FILE the comment is about, as a path on disk. The record
+        # carries the page URL, but an agent should not have to map
+        # "/deck.html" back to somewhere on the filesystem, and getting that
+        # wrong means editing the wrong copy. Empty under --proxy, where the
+        # page is generated and there is no file to name.
+        if not data.get("source_file"):
+            try:
+                doc = urllib.parse.urlparse(data.get("url") or "").path or "/"
+                data["document"] = doc
+                if not self.proxy:
+                    cand = Path(self.served_dir) / doc.lstrip("/")
+                    if doc.endswith("/"):
+                        cand = cand / "index.html"
+                    if cand.is_file():
+                        data["source_file"] = str(cand.resolve())
+            except Exception:
+                pass
+        path.write_text(json.dumps(data, indent=2))
+        sys.stderr.write(f"  annotation → {path.name}: {data.get('comment','')[:70]}\n")
+
+        # Saving always works. Sending additionally wakes the agent now, so the
+        # comment does not sit unread until something else happens to run.
+        delivered, why, agent = False, "", None
+        queued = 0
+        if data.get("send"):
+            delivered, why, agent = _deliver(self.served_dir, self.outdir, 1,
+                                             [path.name], self.on_send)
+            if delivered is None:
+                queued = _queue_add([path.name])
+                delivered = False
+            sys.stderr.write(f"  send → {'delivered' if delivered else 'NOT delivered: ' + why}\n")
+            agent = agent or self.target_name
+
+        raw = json.dumps({"ok": True, "delivered": delivered, "queued": queued,
+                          "why": why, "agent": agent}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self._cors()
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def _proxy_get(self):
+        """Forward to a running dev server and inject into its HTML.
+
+        This is what makes the overlay usable on a real application rather than a
+        folder of files: point it at `npm run dev` and annotate the running app.
+        Identity encoding is requested so there is no gzip to undo before the
+        injection, which matters more than the bandwidth on localhost."""
+        import urllib.error
+        import urllib.request
+
+        url = self.proxy.rstrip("/") + self.path
+        req = urllib.request.Request(url, method="GET")
+        for h in ("Accept", "Accept-Language", "User-Agent", "Cookie", "Referer"):
+            if h in self.headers:
+                req.add_header(h, self.headers[h])
+        req.add_header("Accept-Encoding", "identity")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = r.read()
+                ctype = r.headers.get("Content-Type", "")
+                status = r.status
+                headers = [(k, v) for k, v in r.headers.items()
+                           if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")]
+        except urllib.error.HTTPError as e:
+            body, ctype, status = e.read(), e.headers.get("Content-Type", ""), e.code
+            headers = []
+        except Exception as e:
+            self.send_error(502, f"proxy to {self.proxy} failed: {e}")
+            return
+
+        if "text/html" in ctype.lower():
+            inject = OVERLAY.encode()
+            body = body.replace(b"</body>", inject + b"</body>", 1) if b"</body>" in body else body + inject
+
+        self.send_response(status)
+        for k, v in headers:
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_HEAD(self):
+        # Virtual routes have no file on disk, so the inherited handler 404s and
+        # then crashes logging it. Answer them here; everything else as normal.
+        if self.path.startswith("/__annotate"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self._cors()
+            self.end_headers()
+            return
+        super().do_HEAD()
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+
+    def do_OPTIONS(self):
+        # Preflight for the bookmarklet posting from another origin.
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path.startswith("/__annotate?action=mine"):
+            # Everything stamped for one agent, open first. What a session
+            # checks when it wants its own work rather than the whole folder.
+            who = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query).get("agent", [""])[0]
+            pending, done = self._annotations()
+            pick = lambda rows: [a for a in rows if not who or a.get("agent") == who]
+            return self._json({"agent": who or self.target_name,
+                               "pending": pick(pending), "done": pick(done)})
+        if self.path.startswith("/__annotate?action=list"):
+            pending, done = self._annotations()
+            mine = SRC_MTIME
+            latest = mine
+            for cand in (shutil.which("annotate"),
+                         str(Path.home() / ".local/bin/annotate")):
+                try:
+                    if cand and os.path.exists(cand):
+                        latest = max(latest, os.path.getmtime(os.path.realpath(cand)))
+                except OSError:
+                    pass
+            return self._json({
+                # A long-lived server pins whatever code existed when it
+                # started. A stale one looks identical to a current one, which
+                # is exactly the kind of silent wrong answer worth surfacing.
+                "version": VERSION,
+                "started": STARTED,
+                "stale": latest > mine + 1,
+                "version_age_s": int(latest - mine),
+                "pending": pending, "done": done,
+                # Always say who these reach, so it is never a guess.
+                "agent": self.target_name,
+                "session": self.target_name,
+            })
+        if self.path.startswith("/__annotate.js"):
+            # The overlay on its own, for a bookmarklet on a page we do not serve.
+            js = OVERLAY.replace("<script>", "", 1).rsplit("</script>", 1)[0].encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript; charset=utf-8")
+            self._cors()
+            self.send_header("Content-Length", str(len(js)))
+            self.end_headers()
+            self.wfile.write(js)
+            return
+        if self.proxy:
+            self._proxy_get()
+            return
+        # Inject the overlay into HTML responses so the served pages need no edit.
+        path = self.translate_path(self.path)
+        if os.path.isdir(path):
+            for idx in ("index.html", "index.htm"):
+                if os.path.exists(os.path.join(path, idx)):
+                    path = os.path.join(path, idx)
+                    break
+        if path.endswith((".html", ".htm")) and os.path.exists(path):
+            body = Path(path).read_bytes()
+            inject = OVERLAY.encode()
+            if b"</body>" in body:
+                body = body.replace(b"</body>", inject + b"</body>", 1)
+            else:
+                body += inject
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+
+# Comments queued because the agent was busy. Sending three in a row used to
+# fail on the second: the first wakes the session, which is then busy, so the
+# next is refused. They should accumulate and arrive together instead.
+_QUEUE = set()
+_QUEUE_LOCK = __import__("threading").Lock()
+
+
+def _queue_add(files):
+    with _QUEUE_LOCK:
+        _QUEUE.update(files or [])
+        return len(_QUEUE)
+
+
+def _queue_take():
+    with _QUEUE_LOCK:
+        got, _QUEUE_ = sorted(_QUEUE), None
+        return got
+
+
+def _queue_clear(files):
+    with _QUEUE_LOCK:
+        _QUEUE.difference_update(files or [])
+        return len(_QUEUE)
+
+
+def _deliver(served_dir, outdir, n, files=None, hook=None):
+    """Hand the comments to whoever should act on them.
+
+    Delivery is a HOOK, not built in, because who to wake is entirely local:
+    a tmux session, a webhook, an issue tracker, a desktop notification. The
+    tool's job is to collect the comment and hand it over.
+
+    The hook is run with the annotations directory as argv[1] and the chosen
+    filenames after it, plus REDPEN_DIR and REDPEN_SERVED in the environment.
+    Exit 0 means delivered. Anything it prints on the last line is shown to
+    the commenter, so it can name who it woke.
+
+    Without a hook, comments are saved and nothing else happens, which is a
+    perfectly good mode: the agent reads .annotations/ when it next looks.
+    """
+    import subprocess as _sp
+    if not hook:
+        return False, "no --on-send hook configured", None
+    cmd = [hook, str(outdir)] + list(files or [])
+    env = dict(os.environ, REDPEN_DIR=str(outdir), REDPEN_SERVED=str(served_dir),
+               REDPEN_COUNT=str(n))
+    try:
+        r = _sp.run(cmd, capture_output=True, text=True, timeout=60, env=env)
+    except Exception as e:
+        return False, str(e), None
+    last = (r.stdout.strip().splitlines() or [""])[-1].strip()
+    if r.returncode == 0:
+        return True, "", (last or None)
+    why = r.stderr.strip() or last or f"hook exited {r.returncode}"
+    # 75 is EX_TEMPFAIL: the agent is busy or someone is typing. Not an error
+    # to show him, just not now.
+    if r.returncode == 75:
+        return None, why, None
+    return False, why, None
+
+
+VERSION = "0.1.0"
+
+STARTED = time.time()
+# Snapshot at import. Comparing the running file's CURRENT mtime against the
+# installed binary's current mtime compares a file to itself and can never
+# fire, which is what the first version did.
+SRC_MTIME = os.path.getmtime(__file__)
+
+
+def tailnet_ip():
+    """This machine's tailnet address, read off the interface.
+
+    Not from the Tailscale CLI: under a stripped environment that exits 0 and
+    prints "The Tailscale GUI failed to start" to stdout, so the failure
+    arrives looking exactly like an answer.
+    """
+    import re as _re, subprocess as _sp
+    try:
+        out = _sp.run(["/sbin/ifconfig"], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    for m in _re.finditer(r"inet (100\.\d{1,3}\.\d{1,3}\.\d{1,3})", out):
+        ip = m.group(1)
+        if 64 <= int(ip.split(".")[1]) <= 127:   # Tailscale's CGNAT range
+            return ip
+    return None
+
+
+def _drain_queue(served_dir, outdir, hook, target):
+    """Deliver what is waiting, once the agent is free.
+
+    Processing three comments in a row used to fail on the second: the first
+    wakes the session, which is then busy, so the next was refused with an
+    error. They queue instead, and everything waiting goes in ONE message, so
+    three comments read as three comments rather than waking the session three
+    times.
+    """
+    import threading
+    import time as _t
+
+    def loop():
+        while True:
+            _t.sleep(12)
+            files = _queue_take()
+            if not files:
+                continue
+            # Only send what still exists: anything already actioned has moved
+            # to done/ and must not be delivered a second time.
+            alive = [f for f in files if (Path(outdir) / f).is_file()]
+            gone = [f for f in files if f not in alive]
+            if gone:
+                _queue_clear(gone)
+            if not alive:
+                continue
+            ok, why, _who = _deliver(served_dir, outdir, len(alive), alive, hook)
+            if ok:
+                _queue_clear(alive)
+                sys.stderr.write(f"  queued → delivered {len(alive)} to {target or 'the agent'}\n")
+            elif ok is False:
+                _queue_clear(alive)          # permanent failure: stop retrying
+                sys.stderr.write(f"  queued → gave up: {why}\n")
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Serve a directory with an annotation overlay.")
+    ap.add_argument("directory", nargs="?", default=".",
+                    help="directory to serve (ignored with --proxy, which still uses it for --out)")
+    ap.add_argument("--proxy", default=None, metavar="URL",
+                    help="annotate a running app instead of files, e.g. http://localhost:3000")
+    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--bind", default=None, metavar="ADDR",
+                    help="address to bind (default: 127.0.0.1; use --tailnet "
+                         "to let the laptop reach it directly via `show`)")
+    ap.add_argument("--tailnet", action="store_true",
+                    help="(default) bind the tailnet address, so `show <port>` works")
+    ap.add_argument("--local", action="store_true",
+                    help="bind 127.0.0.1 instead: nothing on the tailnet can reach it")
+    ap.add_argument("--bookmarklet", action="store_true",
+                    help="also print a bookmarklet for annotating pages this server does not serve")
+    ap.add_argument("--out", default=None, help="where annotations land (default: <dir>/.annotations)")
+    ap.add_argument("--on-send", default=None, metavar="CMD",
+                    help="run CMD when he presses process (default: "
+                         "~/.local/bin/redpen-deliver if present), with the annotations dir "
+                         "and chosen filenames as arguments. Exit 0 = delivered; "
+                         "its last line of stdout names who was reached.")
+    ap.add_argument("--no-send", action="store_true",
+                    help="collect comments only; do not wake anyone")
+    ap.add_argument("--version", action="version", version=f"redpen {VERSION}")
+    ap.add_argument("--to", default=None, metavar="NAME",
+                    help="who comments reach, shown in the drawer")
+    a = ap.parse_args()
+
+    root = Path(a.directory).expanduser().resolve()
+    if not root.is_dir():
+        sys.exit(f"not a directory: {root}")
+    outdir = Path(a.out).expanduser().resolve() if a.out else root / ".annotations"
+
+    Handler.root = root
+    Handler.outdir = outdir
+    Handler.served_dir = str(Path(a.directory).resolve())
+    # Default the hook when one is installed. Without this, an agent that
+    # forgets the flag serves a page where "process" quietly reaches nobody,
+    # and the only clue is the drawer saying so in small red text.
+    default_hook = str(Path.home() / ".local/bin/redpen-deliver")
+    Handler.on_send = None if a.no_send else (
+        a.on_send or (default_hook if os.path.exists(default_hook) else None))
+    # If a hook is configured but nobody said who it reaches, ask it once:
+    # run with REDPEN_PROBE=1 and no files. By convention it prints the name
+    # and delivers nothing. Beats polling it on every drawer refresh, and beats
+    # making the commenter guess from the folder name.
+    Handler.target_name = a.to
+    if Handler.on_send and not a.to:
+        try:
+            import subprocess as _sp
+            r = _sp.run([Handler.on_send, str(outdir)], capture_output=True, text=True,
+                        timeout=20, env=dict(os.environ, REDPEN_PROBE="1",
+                                             REDPEN_SERVED=Handler.served_dir))
+            if r.returncode == 0:
+                Handler.target_name = (r.stdout.strip().splitlines() or [""])[-1].strip() or None
+        except Exception:
+            pass
+    Handler.proxy = a.proxy
+    os.chdir(root)
+
+    # Threaded, not the plain TCPServer this used to be. A browser holds its
+    # connection open (keep-alive), and a single-threaded server then blocks
+    # every later request behind it: the page loads once and the server appears
+    # dead to everything afterwards, including the annotation POSTs and any
+    # second tab. It reports HTTP 000 on its own localhost while still listening,
+    # which reads like a network problem and is not one.
+    #
+    # daemon_threads so ctrl-c does not hang waiting on an idle keep-alive.
+    class Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    bind = a.bind
+    # Tailnet by default: the normal case is that he wants to look at it, and
+    # that needs his laptop to reach this machine. --local for anything that
+    # should not be reachable from every device on the tailnet.
+    if not bind and not a.local:
+        a.tailnet = True
+    if a.tailnet and not a.local:
+        bind = tailnet_ip()
+        if not bind:
+            say("  no tailnet address found; is Tailscale up?")
+            sys.exit(2)
+    bind = bind or "127.0.0.1"
+
+    with Server((bind, a.port), Handler) as httpd:
+        say = lambda m="": print(m, flush=True)
+        say(f"  proxying {a.proxy}" if a.proxy else f"  serving {root}")
+        say(f"  annotations → {outdir}")
+        if bind == "127.0.0.1":
+            say(f"  on 127.0.0.1:{a.port} (local only), from the laptop: peek {a.port}")
+        else:
+            say(f"  on {bind}:{a.port}, put it on his screen with: show {a.port}")
+        say("  comments go to: " + (Handler.target_name or "nobody, no agent owns this folder")
+            if Handler.on_send else "  comments are collected only, nobody will be woken")
+        if Handler.on_send:
+            _drain_queue(Handler.served_dir, outdir, Handler.on_send, Handler.target_name)
+        say("  select text + A, option-click (\u2325) anything, or shift-drag a box. ctrl-c to stop.")
+        if a.bookmarklet:
+            # For a page this server does not serve. Works where the site's CSP
+            # allows an injected script; strict script-src (GitHub, most banks)
+            # will refuse it, and nothing here can change that.
+            say()
+            say("  bookmarklet — save as a browser bookmark, click it on any page:")
+            say()
+            say(f"    javascript:(function(){{var s=document.createElement('script');"
+                  f"s.src='http://localhost:{a.port}/__annotate.js?'+Date.now();"
+                  f"document.body.appendChild(s);}})();")
+            say()
+            say(f"  it posts back to localhost:{a.port}, so keep `peek {a.port}` open.")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            say("\n  stopped")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,38 @@
+#!/bin/bash
+# Example redpen delivery hook: wake a tmux session so it acts on the comments
+# now, rather than whenever it next happens to look.
+#
+# redpen knows nothing about who should act on a comment. It calls this with
+# the annotations directory and the chosen filenames, and reads the exit code:
+#
+#   0   delivered
+#   75  not now (busy, someone typing, session down) -> redpen queues and retries
+#   *   permanent failure
+#
+# Its last line of stdout names who was reached, which redpen shows in the
+# drawer. With REDPEN_PROBE=1 and no files, print that name and deliver nothing.
+#
+#   redpen . --on-send ./examples/deliver-tmux --to my-session
+#
+# Set SESSION to your own, or look it up however your setup tracks them.
+
+set -uo pipefail
+SESSION="${REDPEN_SESSION:-work}"
+TMUX="${TMUX_BIN:-$(command -v tmux)}"
+DIR="${1:-}"; shift || true
+
+[ -n "$TMUX" ] || { echo "no tmux found" >&2; exit 1; }
+[ "${REDPEN_PROBE:-}" = "1" ] && { echo "$SESSION"; exit 0; }
+[ $# -gt 0 ] || { echo "nothing to deliver" >&2; exit 1; }
+$TMUX has-session -t "$SESSION" 2>/dev/null || { echo "no session $SESSION" >&2; exit 75; }
+
+# Do not type into a pane that is working, or over something half written.
+# A shell prompt with unsent text, or an agent mid-task, both mean "not now".
+PANE=$($TMUX capture-pane -p -t "$SESSION" | tail -25)
+printf %s "$PANE" | grep -q "esc to interrupt" && { echo "busy" >&2; exit 75; }
+
+$TMUX send-keys -t "$SESSION" C-u
+$TMUX send-keys -t "$SESSION" "$# comment(s) to action in $DIR: $*. Read each, make the change, rebuild whatever is being served, then move the file to $DIR/done/."
+sleep 0.4
+$TMUX send-keys -t "$SESSION" C-m   # its own call: bundled with the text it is absorbed
+echo "$SESSION"
