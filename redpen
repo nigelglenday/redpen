@@ -136,8 +136,9 @@ OVERLAY = r"""
     '.__ann-tab:hover{background:#fafafa}',
     /* Never print the overlay. A PDF of the page is the deliverable; the tab, */
     /* the drawer, the pins and the hint are scaffolding for reviewing it.     */
-    '@media print{.__ann-tab,.__ann-drawer,.__ann-pin,.__ann-hint,.__ann-toast,',
-    '  .__ann-modal,.__ann-box,.__ann-refresh{display:none!important}}',
+    /* Matched by prefix, not by an enumerated list: there are eight top-level */
+    /* elements today and a list of them is a list that goes stale.           */
+    '@media print{[class^="__ann"],[class*=" __ann"]{display:none!important}}',
     '.__ann-refresh{position:fixed;left:50%;bottom:20px;transform:translate(-50%,140%);',
     '  z-index:2147483646;background:#111;color:#fff;border-radius:8px;padding:9px 10px 9px 14px;',
     '  font:13px system-ui;display:flex;align-items:center;gap:12px;transition:transform .2s;',
