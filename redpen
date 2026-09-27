@@ -121,6 +121,7 @@ OVERLAY = r"""
     '.__ann-pin{position:absolute;z-index:2147483643;display:flex;align-items:center;gap:1px;',
     '  padding:2px 5px 2px 3px;border-radius:9px;background:#fff;border:1px solid #e11;',
     '  cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.22);transform:translate(-6px,-24px)}',
+    '.__ann-pin.__gutter{transform:translate(0,-2px)}',
     '.__ann-pin svg{width:12px;height:12px;fill:#e11}',
     '.__ann-pin b{font:600 10px/1 system-ui;color:#e11}',
     '.__ann-pin.__done{border-color:#b9c0cc;opacity:.75;box-shadow:none}',
@@ -307,8 +308,26 @@ OVERLAY = r"""
         '<svg viewBox="0 0 24 24" aria-hidden="true">' +
         '<path d="M15.6 3.6l4.8 4.8-10.2 10.2-6 1.2 1.2-6z"/></svg>' +
         '<b>' + (i + 1) + '</b>';
-      pin.style.left = Math.max(2, x) + 'px';
-      pin.style.top = Math.max(24, y) + 'px';
+      // Put the pin in the LEFT GUTTER, beside the line it marks.
+      //
+      // It used to sit at the anchor's left edge and get shifted up 24px, so a
+      // pin for a mid-paragraph selection landed on the line ABOVE and covered
+      // the characters under it. On a served agreement "CHANGED FROM THE
+      // TEMPLATE" rendered as "CH(pin)GED" and "proposal" as "(pin)posal". A
+      // review tool that hides the text being reviewed is worse than no pin.
+      //
+      // Most documents are a centred column with room to the left. When there
+      // is none, fall back to the old behaviour rather than clamping the pin on
+      // top of the first characters of the line.
+      var GUTTER = 30;
+      if (x >= GUTTER + 4) {
+        pin.classList.add('__gutter');
+        pin.style.left = (x - GUTTER) + 'px';
+        pin.style.top = y + 'px';
+      } else {
+        pin.style.left = Math.max(2, x) + 'px';
+        pin.style.top = Math.max(24, y) + 'px';
+      }
       pin.title = (a.done ? 'done: ' : '') + (a.comment || '');
       pin.onclick = function (ev) {
         ev.stopPropagation();                       // never advance a deck
