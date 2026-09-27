@@ -69,10 +69,42 @@ One JSON file per comment, next to the files being served:
 to somewhere on disk, because getting that wrong means editing the wrong copy
 when a build directory, a published mirror and a repo all hold that filename.
 
-**Open and processed are the filesystem, not a protocol.** A comment is open
-while its file sits in `.annotations/`, and processed once something moves it to
-`.annotations/done/`. That is all the state there is, so both sides can read it
-and neither has to agree with the other about anything.
+**State is the filesystem, not a protocol.** Three directories, and `ls` tells
+you where a comment stands:
+
+```
+.annotations/            open      needs the agent     red pin
+.annotations/answered/   answered  needs a human       amber pin
+.annotations/done/       done      closed              grey pin
+```
+
+That is all the state there is, so both sides can read it and neither has to
+agree with the other about anything.
+
+## Threads, for when a comment is a question
+
+Some comments are not instructions. *"Should this be 90 days or 60?"* has no
+change to make, and before `answered/` existed the agent's only way to respond
+was to make one: pick a number and silently commit you, or do nothing. Both are
+bad, and the first is bad in a way nobody notices.
+
+An agent answers by writing the file. Append to `replies` and move it to
+`answered/`:
+
+```json
+"replies": [
+  { "by": "agent", "text": "90. It is what the template says and nobody objected.",
+    "at": "2026-09-26T12:05:00Z" }
+]
+```
+
+The pin turns amber, the thread appears under the comment it belongs to, and a
+reply box goes back to the same agent. Replying **reopens** the thread: the file
+moves back to `.annotations/`, and the delivery hook fires exactly as it does for
+a new comment.
+
+It stops there on purpose. Reply and reopen is a review loop; anything more is a
+chat client, which this is not.
 
 ## Telling an agent about it
 
@@ -123,7 +155,7 @@ redpen --bookmarklet             the overlay for a page you do not serve
 | `A` | comment on selected text |
 | `⌥` click | comment on the selection, or on the element under the cursor |
 | shift-drag | comment on a region |
-| `enter` | save it and keep reading |
+| `enter` | save it and keep reading, or send a reply on an answered thread |
 | `⌥ enter` | save and process it now |
 | `esc` | cancel |
 
