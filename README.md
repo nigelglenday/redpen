@@ -148,7 +148,28 @@ redpen . --proxy localhost:3000  put the overlay in front of a running dev serve
 redpen <dir> --local             bind 127.0.0.1 instead of the LAN address
 redpen <dir> --no-send           collect comments, wake nobody
 redpen --bookmarklet             the overlay for a page you do not serve
+redpen --overlay                 print the overlay JavaScript, for vendoring
 ```
+
+### Vendoring the overlay
+
+If you are serving the overlay from your own application rather than from
+redpen, pin it. Do not read it out of a working copy: the result then depends on
+the state of one checkout on one machine, and two builds of your app from the
+same commit can differ.
+
+```bash
+git show <commit>:redpen > /tmp/redpen && python3 /tmp/redpen --overlay > vendor/overlay.js
+node --check vendor/overlay.js
+```
+
+`--overlay` needs no directory, no port and no running server, and emits exactly
+the bytes `/__annotate.js` serves, from the same extractor. Record the commit
+next to the file and fail your build when they disagree, so an upgrade is a diff
+someone reviewed.
+
+There is deliberately no `overlay.js` in this repo. redpen is one file you can
+`curl`, and a second copy of the same code is a second copy that drifts.
 
 | key | |
 |---|---|
