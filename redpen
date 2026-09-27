@@ -116,6 +116,17 @@ OVERLAY = r"""
     '.__ann-item .__c{color:#111;line-height:1.35}',
     '.__ann-item .__m{color:#999;font-size:11px;margin-top:3px}',
     '.__ann-item.__done .__c{color:#999;text-decoration:line-through}',
+    '.__ann-item.__answered{background:#fffdf7;border-left:3px solid #c47f00}',
+    // The row is a grid and `.__m` is placed at grid-column 2/4, which creates
+    // implicit columns. Appended children auto-placed into them, so a thread
+    // laid out SIDEWAYS and ran off the panel. Span every column explicitly.
+    '.__ann-item .__ann-reply,.__ann-item .__ann-back{grid-column:1/-1}',
+    '.__ann-reply{margin-top:6px;padding:6px 8px;background:#fff;border:1px solid #f0e2c2;',
+    '  border-radius:5px;font-size:12px;color:#5a4a1f;line-height:1.35}',
+    '.__ann-reply b{color:#c47f00;font-weight:600}',
+    '.__ann-back{display:flex;gap:6px;margin-top:6px}',
+    '.__ann-back textarea{flex:1;font:12px system-ui;padding:5px 7px;border:1px solid #ddd;',
+    '  border-radius:5px;resize:vertical;min-height:30px}',
     '.__ann-item button{font:11px system-ui;padding:2px 8px;margin-top:5px;border-radius:4px;',
     '  border:1px solid #ccc;background:#fafafa;cursor:pointer}',
     '.__ann-pin{position:absolute;z-index:2147483643;display:flex;align-items:center;gap:1px;',
@@ -124,6 +135,8 @@ OVERLAY = r"""
     '.__ann-pin.__gutter{transform:translate(0,-2px)}',
     '.__ann-pin svg{width:12px;height:12px;fill:#e11}',
     '.__ann-pin b{font:600 10px/1 system-ui;color:#e11}',
+    '.__ann-pin.__answered{border-color:#c47f00;background:#fffaf0}',
+    '.__ann-pin.__answered svg{fill:#c47f00}  .__ann-pin.__answered b{color:#c47f00}',
     '.__ann-pin.__done{border-color:#b9c0cc;opacity:.75;box-shadow:none}',
     '.__ann-pin.__done svg{fill:#98a2b3}  .__ann-pin.__done b{color:#98a2b3}',
     '.__ann-pin:hover{box-shadow:0 0 0 3px rgba(238,17,17,.18),0 2px 6px rgba(0,0,0,.22)}',
@@ -303,7 +316,7 @@ OVERLAY = r"""
       }
       if (x === null) return;                       // nothing to anchor to
       var pin = document.createElement('div');
-      pin.className = '__ann-pin' + (a.done ? ' __done' : '');
+      pin.className = '__ann-pin' + (a.done ? ' __done' : (a.state === 'answered' ? ' __answered' : ''));
       pin.innerHTML =
         '<svg viewBox="0 0 24 24" aria-hidden="true">' +
         '<path d="M15.6 3.6l4.8 4.8-10.2 10.2-6 1.2 1.2-6z"/></svg>' +
@@ -459,11 +472,22 @@ OVERLAY = r"""
 
   // Poll for work coming back. NEVER reload on its own: a reload would throw
   // away a comment half typed in the modal. Say so and let him choose.
-  var lastDone = null, banner = null;
+  var lastDone = null, lastAnswered = null, banner = null;
   function noticeProcessed(d) {
     var n = (d.done || []).length;
     if (lastDone !== null && n > lastDone) showRefresh(n - lastDone);
     lastDone = n;
+
+    // An ANSWER is different from a fix. The page did not change, so offering a
+    // refresh would be wrong; what changed is that a thread is now waiting on
+    // you. Say so once, and let the drawer show it.
+    var a = (d.answered || []).length;
+    if (lastAnswered !== null && a > lastAnswered) {
+      var k = a - lastAnswered;
+      toast(k === 1 ? 'a comment was answered, your turn'
+                    : k + ' comments answered, your turn', true);
+    }
+    lastAnswered = a;
   }
   function showRefresh(k) {
     if (!banner) {
@@ -500,9 +524,14 @@ OVERLAY = r"""
     {
         var list = drawer.querySelector('.__ann-list');
         var n = (d.pending || []).length;
+        var nAns = (d.answered || []).length;
         drawer.querySelector('.__ann-count').textContent =
-          n + ' open, ' + (d.done || []).length + ' processed';
-        tab.textContent = n ? ('comments (' + n + ')') : 'comments';
+          n + ' open, ' + (nAns ? nAns + ' answered, ' : '') +
+          (d.done || []).length + ' processed';
+        // An answered thread is waiting on a human, so it belongs in the tab
+        // count too: the whole point of the state is that it is your turn.
+        tab.textContent = (n + nAns) ? ('comments (' + n + (nAns ? '+' + nAns : '') + ')')
+                                     : 'comments';
         // Say how old this server is, and shout if it predates the installed
         // binary. A stale server otherwise looks exactly like a current one.
         var age = drawer.querySelector('.__ann-age');
@@ -526,15 +555,19 @@ OVERLAY = r"""
         // does not appear and disappear under the cursor.
         drawer.querySelector('.__ann-bar').classList.toggle('__ann-none', !n);
         list.innerHTML = '';
-        var items = (d.pending || []).concat(prefs.showDone ? (d.done || []) : []);
+        var items = (d.pending || []).concat(d.answered || [])
+          .concat(prefs.showDone ? (d.done || []) : []);
 
         function row(a) {
+          var answered = a.state === 'answered';
           var el = document.createElement('div');
-          el.className = '__ann-item' + (a.done ? ' __done' : '');
-          el.innerHTML = (a.done ? '' :
+          el.className = '__ann-item' + (a.done ? ' __done' : (answered ? ' __answered' : ''));
+          // An answered row has no checkbox: "process" means wake the agent for
+          // work, and this one is waiting on a person instead.
+          el.innerHTML = ((a.done || answered) ? '' :
               '<input type="checkbox" class="__ann-pick" checked>') +
             '<div class="__c"></div>' +
-            (a.done ? '' : '<button class="__ann-one" title="process just this one">process</button>') +
+            ((a.done || answered) ? '' : '<button class="__ann-one" title="process just this one">process</button>') +
             '<div class="__m"></div>';
           var cb = el.querySelector('.__ann-pick');
           if (cb) { cb.dataset.file = a.file; cb.onchange = updateBar; }
@@ -543,6 +576,50 @@ OVERLAY = r"""
           el.querySelector('.__c').textContent = a.comment || '(no text)';
           el.querySelector('.__m').textContent =
             (a.done ? 'processed · ' : '') + (a.selected_text || a.selector || '').slice(0, 70);
+
+          (a.replies || []).forEach(function (r) {
+            var b = document.createElement('div');
+            b.className = '__ann-reply';
+            b.innerHTML = '<b></b> <span></span>';
+            b.querySelector('b').textContent = (r.by === 'human' ? 'you' : (a.agent || 'agent')) + ':';
+            b.querySelector('span').textContent = r.text || '';
+            el.appendChild(b);
+          });
+
+          if (answered) {
+            var back = document.createElement('div');
+            back.className = '__ann-back';
+            back.innerHTML = '<textarea rows="1" placeholder="reply, and this goes back to ' +
+              (a.agent || 'the agent') + '"></textarea><button>reply</button>';
+            var ta = back.querySelector('textarea'), btn = back.querySelector('button');
+            function send(ev) {
+              if (ev) ev.stopPropagation();
+              var text = ta.value.trim();
+              if (!text) return;
+              btn.disabled = true;
+              fetch(ENDPOINT + '?action=reply', { method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file: a.file, text: text }) })
+                .then(function (r) { return r.json(); })
+                .then(function (r) {
+                  // Queued is a normal state, not an error: the agent is busy
+                  // and it will go when it frees up.
+                  toast(r && r.delivered ? 'sent to ' + (r.agent || 'the agent')
+                        : (r && r.queued ? 'queued for ' + (r.agent || 'the agent')
+                                         : 'saved'),
+                        !!(r && (r.delivered || r.queued)));
+                  loadDrawer();
+                })
+                .catch(function () { btn.disabled = false; toast('could not send'); });
+            }
+            btn.onclick = send;
+            // Enter sends, shift-enter is a newline: the same rule as the modal.
+            ta.onkeydown = function (ev) {
+              ev.stopPropagation();
+              if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); send(); }
+            };
+            el.appendChild(back);
+          }
           return el;
         }
 
@@ -722,9 +799,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             sys.stderr.write("  %s\n" % (fmt % args))
 
     def _annotations(self):
-        """Pending and done, newest first. Done is simply the done/ subfolder,
-        which is where an agent moves a file once it has acted on it."""
-        def read(d, done):
+        """Open, answered and done, newest first. The state IS the directory.
+
+            .annotations/            open      needs the agent
+            .annotations/answered/   answered  the agent replied, needs a human
+            .annotations/done/       done      closed
+
+        answered/ exists because some comments are questions. Before it, an
+        agent's only way to respond was to make a change, so a question got
+        answered by a guess: ask "90 days or 60?" and it either picks one and
+        silently commits you, or does nothing. Both are bad and the first is bad
+        in a way nobody notices.
+
+        Still no protocol. `ls` tells you the state, both sides can read it, and
+        neither has to agree with the other about anything."""
+        def read(d, state):
             out = []
             if not d.is_dir():
                 return out
@@ -734,10 +823,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     continue
                 rec["file"] = f.name
-                rec["done"] = done
+                rec["state"] = state
+                rec["done"] = (state == "done")
+                rec["replies"] = rec.get("replies") or []
                 out.append(rec)
             return out
-        return read(self.outdir, False), read(self.outdir / "done", True)
+        return (read(self.outdir, "open"),
+                read(self.outdir / "answered", "answered"),
+                read(self.outdir / "done", "done"))
+
+    def _find(self, name):
+        """A comment by filename, wherever it currently sits."""
+        name = os.path.basename(name or "")
+        if not name.endswith(".json"):
+            return None
+        for d in (self.outdir, self.outdir / "answered", self.outdir / "done"):
+            f = d / name
+            if f.is_file():
+                return f
+        return None
 
     def _json(self, obj, code=200):
         raw = json.dumps(obj).encode()
@@ -755,7 +859,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 body = json.loads(self.rfile.read(n) or b"{}")
             except Exception:
                 body = {}
-            pending, _ = self._annotations()
+            pending, _answered, _done = self._annotations()
             # A subset if the drawer named files, otherwise everything open.
             want = set(body.get("files") or [])
             chosen = [a for a in pending if a["file"] in want] if want else pending
@@ -771,6 +875,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 _queue_clear(names)
             return self._json({"delivered": ok, "queued": queued, "why": why,
                                "count": len(chosen),
+                               "agent": who or self.target_name})
+        # A human answering back on a thread the agent replied to.
+        #
+        # The agent replies by writing the file: append to replies[] and move it
+        # to answered/. That keeps the filesystem as the protocol and needs no
+        # HTTP. The human's side has to come through the browser, so it is here.
+        #
+        # Replying REOPENS the thread: the file moves back to the open folder and
+        # the agent is woken, because an answered question that gets a follow-up
+        # is work again. Capped at reply-and-reopen on purpose; this is a review
+        # loop, not a chat client.
+        if self.path.startswith("/__annotate?action=reply"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                body = {}
+            src = self._find(body.get("file"))
+            text = (body.get("text") or "").strip()
+            if not src:
+                return self._json({"ok": False, "why": "no such comment"}, 404)
+            if not text:
+                return self._json({"ok": False, "why": "empty reply"}, 400)
+            try:
+                rec = json.loads(src.read_text())
+            except Exception as e:
+                return self._json({"ok": False, "why": f"unreadable: {e}"}, 500)
+            rec.setdefault("replies", []).append({
+                "by": "human",
+                "text": text,
+                "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+            self.outdir.mkdir(parents=True, exist_ok=True)
+            dest = self.outdir / src.name
+            dest.write_text(json.dumps(rec, indent=2))
+            if src.resolve() != dest.resolve():
+                src.unlink()
+            sys.stderr.write(f"  reply → {dest.name}: {text[:70]}\n")
+            delivered, why, who = _deliver(self.served_dir, self.outdir, 1,
+                                           [dest.name], self.on_send)
+            queued = 0
+            if delivered is None:
+                queued = _queue_add([dest.name])
+                delivered = False
+            return self._json({"ok": True, "delivered": delivered,
+                               "queued": queued, "why": why,
                                "agent": who or self.target_name})
         if self.path != "/__annotate":
             self.send_error(404)
@@ -914,12 +1064,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # checks when it wants its own work rather than the whole folder.
             who = urllib.parse.parse_qs(
                 urllib.parse.urlparse(self.path).query).get("agent", [""])[0]
-            pending, done = self._annotations()
+            pending, answered, done = self._annotations()
             pick = lambda rows: [a for a in rows if not who or a.get("agent") == who]
             return self._json({"agent": who or self.target_name,
-                               "pending": pick(pending), "done": pick(done)})
+                               "pending": pick(pending),
+                               "answered": pick(answered), "done": pick(done)})
         if self.path.startswith("/__annotate?action=list"):
-            pending, done = self._annotations()
+            pending, answered, done = self._annotations()
             mine = SRC_MTIME
             latest = mine
             for cand in (shutil.which("annotate"),
@@ -937,7 +1088,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "started": STARTED,
                 "stale": latest > mine + 1,
                 "version_age_s": int(latest - mine),
-                "pending": pending, "done": done,
+                "pending": pending, "answered": answered, "done": done,
                 # Always say who these reach, so it is never a guess.
                 "agent": self.target_name,
                 "session": self.target_name,
