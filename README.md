@@ -36,8 +36,10 @@ open http://localhost:8801/report.html
 - **Comment on anything.** Select text and press `A`, `⌥`-click any element, or
   shift-drag a box. Commenting on a *place* matters as much as on words: "add a
   bullet here" has nothing to highlight.
-- **Pins on the page**, numbered, anchored by CSS selector so they survive a
-  re-render. Open ones are red; processed ones grey, or hidden.
+- **Pins in the left gutter**, numbered, anchored by CSS selector so they survive
+  a re-render. Open ones are red; processed ones grey, or hidden. They sit beside
+  the line they mark rather than on top of it, because a review tool that hides
+  the text being reviewed is worse than no pin at all.
 - **A sidebar** grouping comments by page, with open and processed counts, and
   who the comments are going to.
 - **Process in batches.** Comment as you read, then send the lot. Or one at a
