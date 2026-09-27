@@ -40,6 +40,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+def overlay_js():
+    """The overlay as plain JavaScript, with the <script> wrapper removed.
+
+    One extractor for both the /__annotate.js route and `redpen --overlay`, so a
+    vendored copy and a served copy are the same bytes by construction."""
+    return OVERLAY.replace("<script>", "", 1).rsplit("</script>", 1)[0]
+
+
 OVERLAY = r"""
 <script>
 (function () {
@@ -1095,7 +1103,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             })
         if self.path.startswith("/__annotate.js"):
             # The overlay on its own, for a bookmarklet on a page we do not serve.
-            js = OVERLAY.replace("<script>", "", 1).rsplit("</script>", 1)[0].encode()
+            js = overlay_js().encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/javascript; charset=utf-8")
             self._cors()
@@ -1279,10 +1287,18 @@ def main():
                          "its last line of stdout names who was reached.")
     ap.add_argument("--no-send", action="store_true",
                     help="collect comments only; do not wake anyone")
+    ap.add_argument("--overlay", action="store_true",
+                    help="print the overlay JavaScript to stdout and exit, for vendoring")
     ap.add_argument("--version", action="version", version=f"redpen {VERSION}")
     ap.add_argument("--to", default=None, metavar="NAME",
                     help="who comments reach, shown in the drawer")
     a = ap.parse_args()
+
+    # Before any directory handling: vendoring should not need a servable dir,
+    # a port, or a running server.
+    if a.overlay:
+        sys.stdout.write(overlay_js())
+        return 0
 
     root = Path(a.directory).expanduser().resolve()
     if not root.is_dir():
