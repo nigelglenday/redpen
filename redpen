@@ -111,6 +111,12 @@ OVERLAY = r"""
     '.__ann-one{font:11px system-ui;padding:2px 8px;border-radius:4px;border:1px solid #ccc;',
     '  background:#fafafa;cursor:pointer;opacity:0;transition:opacity .12s}',
     '.__ann-item:hover .__ann-one{opacity:1}',
+    '.__ann-acts{display:flex;gap:5px;align-items:start}',
+    '.__ann-del{font:11px system-ui;padding:2px 8px;border-radius:4px;border:1px solid #ccc;',
+    '  background:#fafafa;color:#666;cursor:pointer;opacity:0;transition:opacity .12s}',
+    '.__ann-item:hover .__ann-del{opacity:1}',
+    '.__ann-del.__armed{background:#e11;border-color:#e11;color:#fff;opacity:1}',
+    '.__ann-del:disabled{opacity:1;background:#eee;border-color:#eee;color:#999;cursor:default}',
     '.__ann-bar.__ann-none{opacity:.55}',
     '.__ann-brand{display:flex;align-items:center;padding:6px 14px 8px;',
     '  border-top:1px solid #f0f0f0;background:#fff}',
@@ -575,12 +581,43 @@ OVERLAY = r"""
           el.innerHTML = ((a.done || answered) ? '' :
               '<input type="checkbox" class="__ann-pick" checked>') +
             '<div class="__c"></div>' +
-            ((a.done || answered) ? '' : '<button class="__ann-one" title="process just this one">process</button>') +
+            '<div class="__ann-acts">' +
+              ((a.done || answered) ? '' : '<button class="__ann-one" title="process just this one">process</button>') +
+              '<button class="__ann-del" title="delete this comment">delete</button>' +
+            '</div>' +
             '<div class="__m"></div>';
           var cb = el.querySelector('.__ann-pick');
           if (cb) { cb.dataset.file = a.file; cb.onchange = updateBar; }
           var one = el.querySelector('.__ann-one');
           if (one) one.onclick = function (ev) { ev.stopPropagation(); processFiles([a.file]); };
+          // Two clicks, not a confirm() dialog: a modal steals focus from a
+          // comment someone may be half way through writing, and this is the
+          // one control here that destroys work. Arms for 4s, then forgets.
+          var del = el.querySelector('.__ann-del'), armed = 0, armTimer = null;
+          if (del) del.onclick = function (ev) {
+            ev.stopPropagation();
+            if (!armed) {
+              armed = 1; del.textContent = 'sure?'; del.classList.add('__armed');
+              armTimer = setTimeout(function () {
+                armed = 0; del.textContent = 'delete'; del.classList.remove('__armed');
+              }, 4000);
+              return;
+            }
+            clearTimeout(armTimer);
+            del.disabled = true; del.textContent = 'deleting';
+            fetch('/__annotate?action=delete', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ file: a.file })
+            }).then(function (r) { return r.json(); }).then(function (d) {
+              if (d && d.deleted) { load(); } else {
+                del.disabled = false; del.textContent = 'delete';
+                del.classList.remove('__armed');
+              }
+            }).catch(function () {
+              del.disabled = false; del.textContent = 'delete';
+              del.classList.remove('__armed');
+            });
+          };
           el.querySelector('.__c').textContent = a.comment || '(no text)';
           el.querySelector('.__m').textContent =
             (a.done ? 'processed · ' : '') + (a.selected_text || a.selector || '').slice(0, 70);
@@ -884,6 +921,37 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._json({"delivered": ok, "queued": queued, "why": why,
                                "count": len(chosen),
                                "agent": who or self.target_name})
+        # Delete a comment. Moves it to deleted/ rather than unlinking: the
+        # state is the directory everywhere else here, deleted/ is not scanned
+        # by _annotations(), and a comment removed by a misclick is recoverable
+        # with `mv`. Nothing reads deleted/, so it costs nothing to keep.
+        if self.path.startswith("/__annotate?action=delete"):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except Exception:
+                body = {}
+            names = body.get("files") or ([body["file"]] if body.get("file") else [])
+            trash = self.outdir / "deleted"
+            gone, missing = [], []
+            for nm in names:
+                src = self._find(nm)
+                if not src:
+                    missing.append(os.path.basename(nm or ""))
+                    continue
+                trash.mkdir(parents=True, exist_ok=True)
+                dst = trash / src.name
+                # A comment deleted, restored and deleted again must not clobber
+                # the first copy; suffix rather than overwrite.
+                i = 1
+                while dst.exists():
+                    dst = trash / (src.stem + "-" + str(i) + ".json")
+                    i += 1
+                src.rename(dst)
+                gone.append(src.name)
+            return self._json({"deleted": len(gone), "files": gone,
+                               "missing": missing, "trash": str(trash)})
+
         # A human answering back on a thread the agent replied to.
         #
         # The agent replies by writing the file: append to replies[] and move it
