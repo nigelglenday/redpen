@@ -166,10 +166,15 @@ suggesting mode for a served page:
    **EDITING** bar appears at the top of the page.
 2. Click any text. Its block (a paragraph, list item, heading, table cell,
    quote, caption) gets a cursor where you clicked. Delete, retype, select a
-   phrase and type over it. Paste is plain text only. Enter is a line break,
-   not a new paragraph.
-3. Edit as many blocks as you like. Changed ones are tinted so you can see what
-   you touched. A block you put back exactly as it was is not an edit.
+   phrase and type over it. Changes are tracked as you type: new text shows in
+   red, deleted text stays on the page struck through in red, and deleting
+   text you typed yourself really removes it. Paste is plain text only. Enter
+   is a line break, not a new paragraph. `⌘ z` undoes one step.
+3. Edit as many blocks as you like. Changed ones get a faint tint. A block you
+   put back exactly as it was is not an edit, and its marks clear when you
+   leave edit mode. The red marks never reach the agent: `new_text` and
+   `new_html` are the edited block with deletions dropped and insertions
+   unwrapped.
 4. **send edits** (or `⌘ enter`) saves one record per changed block and
    delivers them together, exactly like processing a batch of comments. Sent
    blocks turn green and edit mode stays on. **discard** (click twice) puts

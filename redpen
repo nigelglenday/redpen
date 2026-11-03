@@ -210,9 +210,14 @@ OVERLAY = r"""
     'html.__ann-editing .__ann-pin{pointer-events:none;opacity:.35}',
     '[data-rp-edit]{outline:1px dashed rgba(238,17,17,.35);outline-offset:2px}',
     '[data-rp-edit]:focus{outline:2px solid rgba(238,17,17,.55)}',
-    '[data-rp-edit="changed"]{background:rgba(255,214,0,.16);outline:1px solid rgba(214,160,0,.7)}',
-    '[data-rp-edit="sent"]{background:rgba(18,160,80,.08);outline:1px solid rgba(18,160,80,.5)}',
-    '@media print{[data-rp-edit]{outline:none!important;background:none!important}}',
+    '[data-rp-edit="changed"]{background:rgba(255,214,0,.07)}',
+    '[data-rp-edit="sent"]{background:rgba(18,160,80,.06);outline:1px solid rgba(18,160,80,.45)}',
+    'ins.rp-ins{color:#d1180b;text-decoration:none;background:none}',
+    'del.rp-del{color:#d1180b;text-decoration:line-through;text-decoration-color:#d1180b;opacity:.8}',
+    '[data-rp-hide-del] del.rp-del{display:none!important}',
+    'del.rp-del+ins.rp-ins,ins.rp-ins+del.rp-del{margin-left:3px}',
+    '@media print{[data-rp-edit]{outline:none!important;background:none!important}',
+    '  del.rp-del{display:none!important}  ins.rp-ins{color:inherit!important}}',
     '.__ann-item .__ann-kind{display:inline-block;font:600 10px system-ui;letter-spacing:.05em;',
     '  text-transform:uppercase;color:#fff;background:#c47f00;border-radius:3px;padding:1px 5px;',
     '  margin-right:6px;vertical-align:1px}',
@@ -915,18 +920,28 @@ OVERLAY = r"""
     return (t || '').replace(/ /g, ' ').replace(/[ \t]+\n/g, '\n').trim();
   }
   function changed(r) {
-    return norm(r.el.innerText).replace(/\s+/g, ' ') !==
+    return norm(liveText(r.el)).replace(/\s+/g, ' ') !==
            norm(r.origText).replace(/\s+/g, ' ');
   }
   function pendingEdits() { return edits.filter(changed); }
 
-  // What redpen added to a block must never reach the agent as page markup.
+  // What redpen added to a block must never reach the agent as page markup:
+  // its attributes, and the red track-changes marks (deletions dropped,
+  // insertions unwrapped).
   function strip(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('del.rp-del,[data-rp-mark]'),
+      function (d) { d.remove(); });
+    Array.prototype.forEach.call(root.querySelectorAll('ins.rp-ins'), function (i) {
+      while (i.firstChild) i.parentNode.insertBefore(i.firstChild, i);
+      i.remove();
+    });
+    root.normalize();
     [root].concat(Array.prototype.slice.call(root.querySelectorAll('[data-rp-edit]')))
       .forEach(function (n) {
         if (!n.hasAttribute('data-rp-edit')) return;
         n.removeAttribute('data-rp-edit');
         n.removeAttribute('contenteditable');
+        n.removeAttribute('spellcheck');
       });
     return root;
   }
@@ -958,18 +973,210 @@ OVERLAY = r"""
     return n;
   }
 
+  // ---- track changes ---------------------------------------------------
+  // Typing shows in red and deleting strikes the text through in red rather
+  // than removing it, so he sees his edit as he makes it, the way a redline
+  // reads. The browser's own editing is cancelled in beforeinput and redone
+  // here: inserts go in <ins class="rp-ins">, deletions are wrapped in
+  // <del class="rp-del">, and deleting text he typed himself really removes
+  // it. None of this markup reaches the agent: new_text and new_html are
+  // read with deletions dropped and insertions unwrapped.
+  function liveText(el) {
+    el.setAttribute('data-rp-hide-del', '');
+    var t = el.innerText;
+    el.removeAttribute('data-rp-hide-del');
+    return t;
+  }
+  function inside(node, sel, root) {
+    var e = node && (node.nodeType === 1 ? node : node.parentElement);
+    var hit = e && e.closest(sel);
+    return hit && root.contains(hit) ? hit : null;
+  }
+  function marker() { var m = document.createElement('span'); m.setAttribute('data-rp-mark', ''); return m; }
+  function caretAt(node, after) {
+    var rg = document.createRange();
+    if (after) rg.setStartAfter(node); else rg.setStartBefore(node);
+    rg.collapse(true);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+  }
+  function hasLive(rg, root) {
+    var f = rg.cloneContents();
+    Array.prototype.forEach.call(f.querySelectorAll('del.rp-del'), function (d) { d.remove(); });
+    var start = inside(rg.startContainer, 'del.rp-del', root);
+    if (start && start === inside(rg.endContainer, 'del.rp-del', root)) return false;
+    return !!(f.textContent.length || f.querySelector('br,img'));
+  }
+  function tidy(root) {
+    Array.prototype.forEach.call(root.querySelectorAll('ins.rp-ins,del.rp-del'), function (n) {
+      if (!n.textContent && !n.querySelector('br,img')) { n.remove(); return; }
+      var nx = n.nextSibling;
+      while (nx) {
+        if (nx.nodeType === 3 && !nx.data) { var e0 = nx; nx = nx.nextSibling; e0.remove(); continue; }
+        if (!(nx.nodeType === 1 && nx.tagName === n.tagName && nx.className === n.className)) break;
+        while (nx.firstChild) n.appendChild(nx.firstChild);
+        var gone = nx; nx = nx.nextSibling; gone.remove();
+      }
+      n.normalize();
+    });
+  }
+
+  // Strike through what a range covers. Text he inserted himself is removed
+  // outright; text already struck is left alone. Returns the two markers that
+  // bound where the range was, for the caller to put the caret beside.
+  function markDeleted(range, root) {
+    var a = marker(), b = marker();
+    var re = range.cloneRange(); re.collapse(false); re.insertNode(b);
+    var rs = range.cloneRange(); rs.collapse(true); rs.insertNode(a);
+    var nodes = [], w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    var on = false, n;
+    while ((n = w.nextNode())) {
+      if (n === a) { on = true; continue; }
+      if (n === b) break;
+      if (!on) continue;
+      if (n.nodeType === 3 ? n.data.length : /^(BR|IMG)$/.test(n.tagName)) nodes.push(n);
+    }
+    nodes.forEach(function (t) {
+      if (inside(t, 'ins.rp-ins', root)) { t.remove(); return; }
+      if (inside(t, 'del.rp-del', root)) return;
+      var d = document.createElement('del');
+      d.className = 'rp-del';
+      t.parentNode.insertBefore(d, t);
+      d.appendChild(t);
+    });
+    return { a: a, b: b };
+  }
+  function dropMarks(m) { m.a.remove(); m.b.remove(); }
+
+  function snapshot(r) {
+    r.undo = r.undo || [];
+    r.undo.push(r.el.innerHTML);
+    if (r.undo.length > 200) r.undo.shift();
+  }
+
+  function trackedDelete(r, type) {
+    var s = window.getSelection();
+    if (!s.rangeCount) return;
+    var rg = s.getRangeAt(0);
+    // Caret before the strike for backspace, after it for delete and for a
+    // selection, so what he types next reads old then new.
+    var back = rg.collapsed && !/Forward/.test(type);
+    if (rg.collapsed) {
+      // Find what one press would remove, skipping text already struck so a
+      // held backspace keeps walking left instead of stalling on red.
+      var unit = /Word/.test(type) ? 'word' : (/Line/.test(type) ? 'lineboundary' : 'character');
+      var prev = null;
+      for (var i = 0; i < 400; i++) {
+        s.modify('extend', back ? 'backward' : 'forward', unit);
+        var cur = s.getRangeAt(0);
+        if (!r.el.contains(cur.startContainer) || !r.el.contains(cur.endContainer)) { s.collapseToStart(); return; }
+        var key = cur.toString().length + ':' + cur.startOffset + ':' + cur.endOffset;
+        if (key === prev) break;
+        prev = key;
+        if (hasLive(cur, r.el)) break;
+      }
+      rg = s.getRangeAt(0);
+      if (rg.collapsed || !hasLive(rg, r.el)) {
+        // Nothing left to delete that way: just move past the struck text.
+        if (back) s.collapseToStart(); else s.collapseToEnd();
+        return;
+      }
+    }
+    snapshot(r);
+    var m = markDeleted(rg, r.el);
+    caretAt(back ? m.a : m.b, !back);
+    dropMarks(m);
+    tidy(r.el);
+    refresh(r);
+  }
+
+  function trackedInsert(r, text, asBreak) {
+    var s = window.getSelection();
+    if (!s.rangeCount) return;
+    snapshot(r);
+    var rg = s.getRangeAt(0);
+    if (!rg.collapsed) {
+      // Typing over a selection strikes it, then the new text follows it.
+      var m = markDeleted(rg, r.el);
+      caretAt(m.b, true);
+      dropMarks(m);
+      rg = s.getRangeAt(0);
+    }
+    var d = inside(rg.startContainer, 'del.rp-del', r.el);
+    if (d) { caretAt(d, true); rg = s.getRangeAt(0); }
+    var node = asBreak ? document.createElement('br') : document.createTextNode(text);
+    var ins = inside(rg.startContainer, 'ins.rp-ins', r.el);
+    if (ins && !asBreak && rg.startContainer.nodeType === 3) {
+      var t = rg.startContainer, off = rg.startOffset;
+      t.insertData(off, text);
+      rg = document.createRange(); rg.setStart(t, off + text.length); rg.collapse(true);
+      s.removeAllRanges(); s.addRange(rg);
+    } else {
+      if (ins) rg.insertNode(node);
+      else {
+        var wrap = document.createElement('ins');
+        wrap.className = 'rp-ins';
+        wrap.appendChild(node);
+        rg.insertNode(wrap);
+        var pv = wrap.previousSibling;
+        if (pv && pv.nodeType === 1 && pv.tagName === 'INS' && pv.className === 'rp-ins') {
+          pv.appendChild(node); wrap.remove();
+        }
+      }
+      if (node.nodeType === 3) {
+        rg = document.createRange(); rg.setStart(node, node.length); rg.collapse(true);
+        s.removeAllRanges(); s.addRange(rg);
+      } else caretAt(node, true);
+    }
+    tidy(r.el);
+    refresh(r);
+  }
+
+  function trackedUndo(r) {
+    if (!r.undo || !r.undo.length) return;
+    r.el.innerHTML = r.undo.pop();
+    var rg = document.createRange(); rg.selectNodeContents(r.el); rg.collapse(false);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+    refresh(r);
+  }
+
+  function onBeforeInput(r, e) {
+    if (!r.el.isContentEditable) return;
+    var t = e.inputType || '';
+    if (t === 'insertCompositionText') return;     // IME: cannot be cancelled
+    e.preventDefault();
+    if (t.indexOf('delete') === 0) { trackedDelete(r, t); return; }
+    if (t === 'insertText' || t === 'insertReplacementText' || t === 'insertFromDrop') {
+      var tr = e.getTargetRanges && e.getTargetRanges();
+      if (t === 'insertReplacementText' && tr && tr.length) {
+        var rg = document.createRange();
+        rg.setStart(tr[0].startContainer, tr[0].startOffset);
+        rg.setEnd(tr[0].endContainer, tr[0].endOffset);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+      }
+      var text = e.data != null ? e.data :
+        (e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
+      if (text) trackedInsert(r, text);
+      return;
+    }
+    if (t === 'insertLineBreak' || t === 'insertParagraph') { trackedInsert(r, '', true); return; }
+    if (t === 'historyUndo') { trackedUndo(r); return; }
+    // Formatting, history redo and the rest are refused: a redline of
+    // wording, not a word processor.
+  }
+
   function wire(r) {
     if (r.wired) return;
     r.wired = true;
     var el = r.el;
     el.addEventListener('input', function () { refresh(r); });
+    el.addEventListener('beforeinput', function (e) { onBeforeInput(r, e); });
     // Paste is plain text only. Rich paste drags in another page's markup,
     // which the agent would then dutifully try to reproduce.
     el.addEventListener('paste', function (e) {
       if (!el.isContentEditable) return;
       e.preventDefault();
       var t = (e.clipboardData || window.clipboardData).getData('text/plain') || '';
-      document.execCommand('insertText', false, t);
+      if (t) trackedInsert(r, t);
     });
     el.addEventListener('drop', function (e) {
       if (el.isContentEditable) e.preventDefault();
@@ -981,10 +1188,16 @@ OVERLAY = r"""
       e.stopPropagation();
       if (e.key === 'Escape') { e.preventDefault(); setEditMode(false); return; }
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendEdits(); return; }
+      // Undo is ours: the browser's history never saw the tracked edits.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z' || e.key === 'y')) {
+        e.preventDefault();
+        if (e.key === 'z' && !e.shiftKey) trackedUndo(r);
+        return;
+      }
       if (e.key === 'Enter') {
         // A line break, not a new paragraph: a new block is a cross-block edit.
         e.preventDefault();
-        document.execCommand('insertLineBreak');
+        trackedInsert(r, '', true);
       }
     });
   }
@@ -1011,6 +1224,9 @@ OVERLAY = r"""
       if (n && n.nodeType === 1) n.innerHTML = r.origInner;
     });
     strip(c);
+    // A block sent earlier still shows its red marks. Editing it again starts
+    // from what was sent, so accept those marks first.
+    if (!inner.length && block.querySelector('ins.rp-ins,del.rp-del')) block.innerHTML = c.innerHTML;
     var rec = {
       el: block,
       origInner: c.innerHTML,
@@ -1019,9 +1235,12 @@ OVERLAY = r"""
       wasSent: block.getAttribute('data-rp-edit') === 'sent'
     };
     edits = edits.filter(function (r) { return inner.indexOf(r) < 0; });
-    inner.forEach(function (r) { r.el.removeAttribute('contenteditable'); });
+    inner.forEach(function (r) { r.el.removeAttribute('contenteditable'); r.el.removeAttribute('spellcheck'); });
     edits.push(rec);
     wire(rec);
+    // Spellcheck squiggles land on red marks and on struck text run into new
+    // text ("handin"), so they are off while he edits.
+    block.spellcheck = false;
     block.contentEditable = 'true';
     refresh(rec);
     return rec;
@@ -1090,7 +1309,13 @@ OVERLAY = r"""
     } else {
       var a = document.activeElement;
       if (a && a.closest && a.closest('[data-rp-edit]')) a.blur();
-      edits.forEach(function (r) { r.el.removeAttribute('contenteditable'); refresh(r); });
+      edits.forEach(function (r) {
+        r.el.removeAttribute('contenteditable'); r.el.removeAttribute('spellcheck');
+        // Struck and retyped back to the same words is not an edit: clear
+        // the red marks rather than leave a redline of nothing.
+        if (!changed(r) && r.el.querySelector('ins.rp-ins,del.rp-del')) r.el.innerHTML = r.origInner;
+        refresh(r);
+      });
       // A block clicked into and left as it was is not an edit; forget it.
       edits = pendingEdits();
     }
@@ -1098,7 +1323,7 @@ OVERLAY = r"""
   }
 
   function markSent(r) {
-    r.el.removeAttribute('contenteditable');
+    r.el.removeAttribute('contenteditable'); r.el.removeAttribute('spellcheck');
     if (document.activeElement === r.el) r.el.blur();
     r.el.setAttribute('data-rp-edit', 'sent');
     edits = edits.filter(function (x) { return x !== r; });
@@ -1107,7 +1332,7 @@ OVERLAY = r"""
   function discardEdits() {
     edits.forEach(function (r) {
       r.el.innerHTML = r.origInner;
-      r.el.removeAttribute('contenteditable');
+      r.el.removeAttribute('contenteditable'); r.el.removeAttribute('spellcheck');
       if (r.wasSent) r.el.setAttribute('data-rp-edit', 'sent');
       else r.el.removeAttribute('data-rp-edit');
     });
@@ -1125,7 +1350,7 @@ OVERLAY = r"""
     // saved, and parallel saves of similar text would race for the name.
     list.forEach(function (r) {
       chain = chain.then(function () {
-        var oldText = norm(r.origText), newText = norm(r.el.innerText);
+        var oldText = norm(r.origText), newText = norm(liveText(r.el));
         var rr = r.el.getBoundingClientRect();
         var payload = {
           type: 'edit',
@@ -1749,7 +1974,7 @@ def _deliver(served_dir, outdir, n, files=None, hook=None):
     return False, why, None
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 STARTED = time.time()
 # Snapshot at import. Comparing the running file's CURRENT mtime against the
