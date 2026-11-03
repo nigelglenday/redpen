@@ -32,7 +32,7 @@ PANE=$($TMUX capture-pane -p -t "$SESSION" | tail -25)
 printf %s "$PANE" | grep -q "esc to interrupt" && { echo "busy" >&2; exit 75; }
 
 $TMUX send-keys -t "$SESSION" C-u
-$TMUX send-keys -t "$SESSION" "$# comment(s) to action in $DIR: $*. Read each, make the change, rebuild whatever is being served, then move the file to $DIR/done/."
+$TMUX send-keys -t "$SESSION" "$# annotation(s) to action in $DIR: $*. Read each. type comment: make the change. type edit: new wording typed over the page; find the block in the SOURCE by old_text fragments and element_html, make it read as new_text keeping the inline markup that survived (bold, links), and if you cannot place it, reply on the thread instead of guessing. Then rebuild whatever is being served, show the result, and move the file to $DIR/done/."
 sleep 0.4
 $TMUX send-keys -t "$SESSION" C-m   # its own call: bundled with the text it is absorbed
 echo "$SESSION"
