@@ -23,6 +23,8 @@ serving them, which is the machine the agent is on, so nothing is copied back.
 Interactions:
   - Select text, then press A (or right-click) to comment on the selection.
   - Hold Shift and drag to lasso a region, then comment on what it covers.
+  - Press E for edit mode: click any text and type over it, then send edits.
+    Each changed block is saved with its old and new text, like a comment.
   - Esc cancels.
 """
 
@@ -177,13 +179,52 @@ OVERLAY = r"""
     '.__ann-toast{position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#111;color:#fff;',
     '  padding:8px 14px;border-radius:6px;font:13px system-ui;opacity:.95}',
     '.__ann-hint{position:fixed;bottom:16px;left:16px;z-index:2147483645;background:rgba(0,0,0,.72);color:#fff;',
-    '  padding:6px 10px;border-radius:6px;font:12px system-ui}'
+    '  padding:6px 10px;border-radius:6px;font:12px system-ui}',
+    // Edit mode. The page's own blocks are marked with a DATA attribute, not a
+    // class: the print rule above hides anything whose class starts with
+    // __ann, and an edited paragraph must still print.
+    '.__ann-edittab{position:fixed;top:calc(50% + 62px);right:0;z-index:2147483644;',
+    '  font:11px system-ui;letter-spacing:.04em;padding:10px 7px;border-radius:8px 0 0 8px;',
+    '  border:1px solid #ddd;border-right:none;background:#fff;cursor:pointer;',
+    '  box-shadow:-2px 0 10px rgba(0,0,0,.10);writing-mode:vertical-rl;text-orientation:mixed}',
+    '.__ann-edittab:hover{background:#fafafa}',
+    '.__ann-edittab.__on{background:#e11;border-color:#e11;color:#fff}',
+    '.__ann-editbar{position:fixed;top:12px;left:50%;transform:translateX(-50%);',
+    '  z-index:2147483646;display:flex;align-items:center;gap:10px;padding:7px 8px 7px 10px;',
+    '  background:#fff;border:1px solid #e11;border-radius:8px;font:13px system-ui;color:#333;',
+    '  box-shadow:0 6px 20px rgba(0,0,0,.18)}',
+    '.__ann-editbar .__badge{background:#e11;color:#fff;font:600 11px system-ui;',
+    '  letter-spacing:.04em;padding:3px 7px;border-radius:4px}',
+    '.__ann-editbar .__badge.__off{background:#888}',
+    '.__ann-editbar button{font:12px system-ui;padding:4px 11px;border-radius:5px;',
+    '  border:1px solid #ccc;background:#f6f6f6;cursor:pointer}',
+    '.__ann-editbar button.__send{background:#111;border-color:#111;color:#fff}',
+    '.__ann-editbar button:disabled{background:#eee;border-color:#eee;color:#aaa;cursor:default}',
+    '.__ann-editbar button.__x{border:none;background:none;font-size:18px;line-height:1;color:#999;padding:0 4px}',
+    'html.__ann-editing [data-rp-edit],html.__ann-editing p,html.__ann-editing li,',
+    'html.__ann-editing h1,html.__ann-editing h2,html.__ann-editing h3,html.__ann-editing h4,',
+    'html.__ann-editing h5,html.__ann-editing h6,html.__ann-editing td,html.__ann-editing th,',
+    'html.__ann-editing blockquote,html.__ann-editing dd,html.__ann-editing dt,',
+    'html.__ann-editing figcaption{cursor:text}',
+    'html.__ann-editing a{cursor:text}',
+    'html.__ann-editing .__ann-pin{pointer-events:none;opacity:.35}',
+    '[data-rp-edit]{outline:1px dashed rgba(238,17,17,.35);outline-offset:2px}',
+    '[data-rp-edit]:focus{outline:2px solid rgba(238,17,17,.55)}',
+    '[data-rp-edit="changed"]{background:rgba(255,214,0,.16);outline:1px solid rgba(214,160,0,.7)}',
+    '[data-rp-edit="sent"]{background:rgba(18,160,80,.08);outline:1px solid rgba(18,160,80,.5)}',
+    '@media print{[data-rp-edit]{outline:none!important;background:none!important}}',
+    '.__ann-item .__ann-kind{display:inline-block;font:600 10px system-ui;letter-spacing:.05em;',
+    '  text-transform:uppercase;color:#fff;background:#c47f00;border-radius:3px;padding:1px 5px;',
+    '  margin-right:6px;vertical-align:1px}',
+    '.__ann-item .__c del{color:#b42318;background:#fde8e6;text-decoration:line-through;margin-right:3px}',
+    '.__ann-item .__c ins{color:#067647;background:#e6f6ec;text-decoration:underline}',
+    '.__ann-item .__c .__gap{color:#aaa}'
   ].join('\n');
   document.head.appendChild(css);
 
   var hint = document.createElement('div');
   hint.className = '__ann-hint';
-  hint.textContent = 'select text + A  ·  \u2325 option-click anything  ·  shift-drag a box  ·  esc cancels';
+  hint.textContent = 'select text + A  ·  \u2325 option-click anything  ·  shift-drag a box  ·  E edits text  ·  esc cancels';
   document.body.appendChild(hint);
   setTimeout(function(){ hint.style.transition='opacity .6s'; hint.style.opacity='0'; }, 6000);
 
@@ -215,7 +256,8 @@ OVERLAY = r"""
     // wins the outermost-element test and the agent gets __ann-box back.
     return !!(el.closest && el.closest(
       '.__ann-box, .__ann-modal, .__ann-hint, .__ann-toast, ' +
-      '.__ann-drawer, .__ann-tab, .__ann-pin, .__ann-refresh'));
+      '.__ann-drawer, .__ann-tab, .__ann-pin, .__ann-refresh, ' +
+      '.__ann-edittab, .__ann-editbar'));
   }
 
   function elementsIn(rect) {
@@ -355,7 +397,8 @@ OVERLAY = r"""
         pin.style.left = Math.max(2, x) + 'px';
         pin.style.top = Math.max(24, y) + 'px';
       }
-      pin.title = (a.done ? 'done: ' : '') + (a.comment || '');
+      pin.title = (a.done ? 'done: ' : '') +
+        (a.type === 'edit' ? 'edit: ' + (a.new_text || '').slice(0, 120) : (a.comment || ''));
       pin.onclick = function (ev) {
         ev.stopPropagation();                       // never advance a deck
         ensureDrawer();
@@ -378,7 +421,7 @@ OVERLAY = r"""
   // Pending vs done is read straight off the filesystem: the agent moves a
   // file into .annotations/done/ when it has acted on it, which is the
   // convention already in use. No status protocol to keep in sync.
-  var drawer = null, tab = null;
+  var drawer = null, tab = null, editTab = null;
   var prefs = { group: 'page', showDone: false };
   try { Object.assign(prefs, JSON.parse(localStorage.getItem('__ann_prefs') || '{}')); } catch (e) {}
   function savePrefs() {
@@ -395,6 +438,15 @@ OVERLAY = r"""
       if (drawer.classList.contains('__ann-open')) loadDrawer();
     };
     document.body.appendChild(tab);
+
+    // The edit toggle sits under the comments tab: same edge, same look, so
+    // it reads as part of the same tool and collides with nothing new.
+    editTab = document.createElement('button');
+    editTab.className = '__ann-edittab' + (editMode ? ' __on' : '');
+    editTab.textContent = 'edit text';
+    editTab.title = 'edit mode: click any text and type over it (E)';
+    editTab.onclick = function () { setEditMode(!editMode); };
+    document.body.appendChild(editTab);
 
     drawer = document.createElement('div');
     drawer.className = '__ann-drawer';
@@ -605,11 +657,11 @@ OVERLAY = r"""
             }
             clearTimeout(armTimer);
             del.disabled = true; del.textContent = 'deleting';
-            fetch('/__annotate?action=delete', {
+            fetch(ENDPOINT + '?action=delete', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ file: a.file })
             }).then(function (r) { return r.json(); }).then(function (d) {
-              if (d && d.deleted) { load(); } else {
+              if (d && d.deleted) { loadDrawer(); } else {
                 del.disabled = false; del.textContent = 'delete';
                 del.classList.remove('__armed');
               }
@@ -618,9 +670,19 @@ OVERLAY = r"""
               del.classList.remove('__armed');
             });
           };
-          el.querySelector('.__c').textContent = a.comment || '(no text)';
-          el.querySelector('.__m').textContent =
-            (a.done ? 'processed · ' : '') + (a.selected_text || a.selector || '').slice(0, 70);
+          if (a.type === 'edit') {
+            // An edit reads as the change itself: old struck, new underlined,
+            // long unchanged runs folded so a one-word fix stays one line.
+            var c = el.querySelector('.__c');
+            c.innerHTML = '<span class="__ann-kind">edit</span>';
+            c.appendChild(renderDiff(a.diff || diffWords(a.old_text || '', a.new_text || '')));
+            el.querySelector('.__m').textContent = (a.done ? 'processed · ' : '') +
+              (a.selector || '').slice(0, 70);
+          } else {
+            el.querySelector('.__c').textContent = a.comment || '(no text)';
+            el.querySelector('.__m').textContent =
+              (a.done ? 'processed · ' : '') + (a.selected_text || a.selector || '').slice(0, 70);
+          }
 
           (a.replies || []).forEach(function (r) {
             var b = document.createElement('div');
@@ -729,6 +791,7 @@ OVERLAY = r"""
 
   document.addEventListener('click', function (e) {
     if (modal || isOurs(e.target)) return;
+    if (editMode) { editClick(e); return; }
     if (!e.altKey && !commentMode) return;
     // In comment mode a click is for us, so stop the page acting on it.
     e.preventDefault();
@@ -757,13 +820,27 @@ OVERLAY = r"""
     commentOnElement(el, e.clientX, e.clientY);
   }, true);
 
-  // Text selection -> press A
+  // Text selection -> press A. E toggles edit mode.
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closeModal(); return; }
+    if (e.key === 'Escape') {
+      if (modal) { closeModal(); return; }
+      if (editMode) { setEditMode(false); return; }
+      closeModal(); return;
+    }
     if (modal) return;
-    if (e.key !== 'a' && e.key !== 'A') return;
     var tag = (e.target.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+    var typing = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
+    if ((e.key === 'e' || e.key === 'E') && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      setEditMode(!editMode);
+      return;
+    }
+    if ((e.key === 'Enter') && (e.metaKey || e.ctrlKey) && !typing && pendingEdits().length) {
+      e.preventDefault(); sendEdits(); return;
+    }
+    if (editMode) return;                       // no A-comments while editing
+    if (e.key !== 'a' && e.key !== 'A') return;
+    if (typing) return;
     var sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
     e.preventDefault();
@@ -782,7 +859,7 @@ OVERLAY = r"""
 
   // Shift-drag -> box
   document.addEventListener('mousedown', function (e) {
-    if (!e.shiftKey || modal) return;
+    if (!e.shiftKey || modal || editMode) return;
     e.preventDefault();
     start = { x: e.clientX, y: e.clientY };
     box = document.createElement('div');
@@ -818,6 +895,403 @@ OVERLAY = r"""
               w: Math.round(rect.right - rect.left), h: Math.round(rect.bottom - rect.top) }
     });
   });
+
+  // ---- edit mode -------------------------------------------------------
+  // For wording, typing over the text says it better than a comment does.
+  // E (or the "edit text" tab) makes any text block editable in place; send
+  // edits saves one record per changed block, old and new text side by side,
+  // and delivers them exactly like comments. The page itself is never saved:
+  // the agent applies the change to the SOURCE and rebuilds, because the
+  // served HTML is usually generated and an edit to it would be overwritten.
+  //
+  // One block per record. Merging paragraphs or moving text between blocks is
+  // out of scope; an edit that somehow covers several blocks is sent as an
+  // edit of the outer one.
+  var editMode = false, editBar = null, sendingEdits = false;
+  var edits = [];      // { el, origText, origInner, origHtml, wasSent }
+  var BLOCKS = 'p,li,h1,h2,h3,h4,h5,h6,td,th,blockquote,dd,dt,figcaption';
+
+  function norm(t) {
+    return (t || '').replace(/ /g, ' ').replace(/[ \t]+\n/g, '\n').trim();
+  }
+  function changed(r) {
+    return norm(r.el.innerText).replace(/\s+/g, ' ') !==
+           norm(r.origText).replace(/\s+/g, ' ');
+  }
+  function pendingEdits() { return edits.filter(changed); }
+
+  // What redpen added to a block must never reach the agent as page markup.
+  function strip(root) {
+    [root].concat(Array.prototype.slice.call(root.querySelectorAll('[data-rp-edit]')))
+      .forEach(function (n) {
+        if (!n.hasAttribute('data-rp-edit')) return;
+        n.removeAttribute('data-rp-edit');
+        n.removeAttribute('contenteditable');
+      });
+    return root;
+  }
+  function cleanHtml(el) { return strip(el.cloneNode(true)).outerHTML; }
+
+  // innerText needs layout, so a detached clone has none. Measure the
+  // original text of an absorbed block by rendering it invisibly for a moment.
+  function textOfInner(el, inner) {
+    var c = el.cloneNode(false);
+    c.innerHTML = inner;
+    c.style.cssText += ';position:absolute;left:-99999px;top:0;opacity:0;pointer-events:none';
+    el.parentNode.insertBefore(c, el);
+    var t = c.innerText;
+    c.remove();
+    return t;
+  }
+
+  function pathTo(root, node) {
+    var p = [];
+    while (node && node !== root) {
+      p.unshift(Array.prototype.indexOf.call(node.parentNode.childNodes, node));
+      node = node.parentNode;
+    }
+    return p;
+  }
+  function follow(root, p) {
+    var n = root;
+    for (var i = 0; n && i < p.length; i++) n = n.childNodes[p[i]];
+    return n;
+  }
+
+  function wire(r) {
+    if (r.wired) return;
+    r.wired = true;
+    var el = r.el;
+    el.addEventListener('input', function () { refresh(r); });
+    // Paste is plain text only. Rich paste drags in another page's markup,
+    // which the agent would then dutifully try to reproduce.
+    el.addEventListener('paste', function (e) {
+      if (!el.isContentEditable) return;
+      e.preventDefault();
+      var t = (e.clipboardData || window.clipboardData).getData('text/plain') || '';
+      document.execCommand('insertText', false, t);
+    });
+    el.addEventListener('drop', function (e) {
+      if (el.isContentEditable) e.preventDefault();
+    });
+    el.addEventListener('keydown', function (e) {
+      if (!el.isContentEditable) return;
+      // Kept inside the block: the page's own key handlers (a deck that
+      // advances on space or arrows) must not see typing.
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); setEditMode(false); return; }
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendEdits(); return; }
+      if (e.key === 'Enter') {
+        // A line break, not a new paragraph: a new block is a cross-block edit.
+        e.preventDefault();
+        document.execCommand('insertLineBreak');
+      }
+    });
+  }
+
+  function refresh(r) {
+    if (changed(r)) r.el.setAttribute('data-rp-edit', 'changed');
+    else if (editMode) r.el.setAttribute('data-rp-edit', 'open');
+    else if (r.wasSent) r.el.setAttribute('data-rp-edit', 'sent');
+    else r.el.removeAttribute('data-rp-edit');
+    updateEditBar();
+  }
+
+  // The record for a block, created at first focus with the ORIGINAL text and
+  // HTML. A block inside one already being edited belongs to that one; a block
+  // that contains ones already being edited absorbs them, with their originals
+  // put back so the outer record's original really is the original.
+  function beginEdit(block) {
+    var outer = edits.filter(function (r) { return r.el.contains(block); })[0];
+    if (outer) { outer.el.contentEditable = 'true'; refresh(outer); return outer; }
+    var inner = edits.filter(function (r) { return block.contains(r.el); });
+    var c = block.cloneNode(true);
+    inner.forEach(function (r) {
+      var n = follow(c, pathTo(block, r.el));
+      if (n && n.nodeType === 1) n.innerHTML = r.origInner;
+    });
+    strip(c);
+    var rec = {
+      el: block,
+      origInner: c.innerHTML,
+      origHtml: c.outerHTML,
+      origText: inner.length ? textOfInner(block, c.innerHTML) : block.innerText,
+      wasSent: block.getAttribute('data-rp-edit') === 'sent'
+    };
+    edits = edits.filter(function (r) { return inner.indexOf(r) < 0; });
+    inner.forEach(function (r) { r.el.removeAttribute('contenteditable'); });
+    edits.push(rec);
+    wire(rec);
+    block.contentEditable = 'true';
+    refresh(rec);
+    return rec;
+  }
+
+  function blockAt(t) {
+    if (!t || t.nodeType !== 1 || isOurs(t)) return null;
+    var b = t.closest(BLOCKS);
+    if (b) return b;
+    if (t === document.body || t === document.documentElement) return null;
+    if (t.querySelector(BLOCKS)) return null;      // the space between blocks
+    if (!norm(t.innerText)) return null;            // an image, a rule, nothing to type over
+    return t;
+  }
+
+  function placeCaret(el, x, y) {
+    var r = null;
+    if (document.caretRangeFromPoint) r = document.caretRangeFromPoint(x, y);
+    else if (document.caretPositionFromPoint) {
+      var p = document.caretPositionFromPoint(x, y);
+      if (p) { r = document.createRange(); r.setStart(p.offsetNode, p.offset); }
+    }
+    if (!r || !el.contains(r.startContainer)) return;
+    r.collapse(true);
+    var s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+  }
+
+  // Made editable on MOUSEDOWN, so the browser's own handling of that same
+  // press puts the caret where he clicked and a drag selects words to type
+  // over. The click handler is the fallback and stops links navigating.
+  document.addEventListener('mousedown', function (e) {
+    if (!editMode || modal || e.button !== 0) return;
+    var t = e.target.nodeType === 1 ? e.target : e.target.parentElement;
+    if (!t || isOurs(t)) return;
+    var b = blockAt(t);
+    if (b) beginEdit(b);
+  }, true);
+
+  function editClick(e) {
+    var t = e.target.nodeType === 1 ? e.target : e.target.parentElement;
+    if (!t) return;
+    // In edit mode a click is for editing: a link must not navigate and the
+    // page's own click handlers (a deck advancing a slide) must not fire.
+    e.stopPropagation();
+    if (t.closest('a')) e.preventDefault();
+    var b = blockAt(t);
+    if (!b) return;
+    var rec = beginEdit(b);
+    var s = window.getSelection();
+    var inside = s && s.rangeCount && rec.el.contains(s.getRangeAt(0).startContainer);
+    if (document.activeElement !== rec.el || !inside) {
+      rec.el.focus({ preventScroll: true });
+      placeCaret(rec.el, e.clientX, e.clientY);
+    }
+  }
+
+  function setEditMode(on) {
+    editMode = !!on;
+    document.documentElement.classList.toggle('__ann-editing', editMode);
+    if (editTab) editTab.classList.toggle('__on', editMode);
+    if (editMode) {
+      closeModal();
+      edits.forEach(function (r) { r.el.contentEditable = 'true'; refresh(r); });
+    } else {
+      var a = document.activeElement;
+      if (a && a.closest && a.closest('[data-rp-edit]')) a.blur();
+      edits.forEach(function (r) { r.el.removeAttribute('contenteditable'); refresh(r); });
+      // A block clicked into and left as it was is not an edit; forget it.
+      edits = pendingEdits();
+    }
+    updateEditBar();
+  }
+
+  function markSent(r) {
+    r.el.removeAttribute('contenteditable');
+    if (document.activeElement === r.el) r.el.blur();
+    r.el.setAttribute('data-rp-edit', 'sent');
+    edits = edits.filter(function (x) { return x !== r; });
+  }
+
+  function discardEdits() {
+    edits.forEach(function (r) {
+      r.el.innerHTML = r.origInner;
+      r.el.removeAttribute('contenteditable');
+      if (r.wasSent) r.el.setAttribute('data-rp-edit', 'sent');
+      else r.el.removeAttribute('data-rp-edit');
+    });
+    edits = [];
+    updateEditBar();
+  }
+
+  function sendEdits() {
+    var list = pendingEdits();
+    if (!list.length || sendingEdits) return;
+    sendingEdits = true;
+    updateEditBar();
+    var files = [], chain = Promise.resolve();
+    // One at a time: each record is a file named from the second it was
+    // saved, and parallel saves of similar text would race for the name.
+    list.forEach(function (r) {
+      chain = chain.then(function () {
+        var oldText = norm(r.origText), newText = norm(r.el.innerText);
+        var rr = r.el.getBoundingClientRect();
+        var payload = {
+          type: 'edit',
+          kind: 'edit',
+          send: false,
+          old_text: oldText,
+          new_text: newText,
+          diff: diffWords(oldText, newText),
+          selector: selectorFor(r.el),
+          element_html: r.origHtml.slice(0, 20000),
+          new_html: cleanHtml(r.el).slice(0, 20000),
+          url: location.href,
+          title: document.title,
+          viewport: { w: window.innerWidth, h: window.innerHeight },
+          scroll: { x: window.scrollX, y: window.scrollY },
+          rect: { x: Math.round(rr.left), y: Math.round(rr.top),
+                  w: Math.round(rr.width), h: Math.round(rr.height) },
+          at: new Date().toISOString()
+        };
+        return fetch(ENDPOINT, { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload) })
+          .then(function (res) {
+            if (!res.ok) throw new Error('save failed: ' + res.status);
+            return res.json();
+          })
+          .then(function (d) { if (d.file) files.push(d.file); markSent(r); });
+      });
+    });
+    // Saved one by one, delivered as one batch: the agent is woken once for
+    // all of them, the same way "process" sends several comments.
+    chain.then(function () {
+      if (files.length) return processFiles(files);
+    }).catch(function (e) {
+      toast(e.message || 'save failed', false);
+    }).then(function () {
+      sendingEdits = false;
+      updateEditBar();
+      loadDrawer();
+    });
+  }
+
+  function updateEditBar() {
+    var n = pendingEdits().length;
+    if (!editMode && !n) { if (editBar) { editBar.remove(); editBar = null; } return; }
+    if (!editBar) {
+      editBar = document.createElement('div');
+      editBar.className = '__ann-editbar';
+      editBar.innerHTML = '<span class="__badge"></span><span class="__n"></span>' +
+        '<button class="__discard" title="put every unsent block back as it was">discard</button>' +
+        '<button class="__send" title="send every changed block to the agent (⌘ enter)">send edits</button>' +
+        '<button class="__x" title="stop editing (esc)">×</button>';
+      document.body.appendChild(editBar);
+      var dis = editBar.querySelector('.__discard'), armed = 0, armTimer = null;
+      // Two clicks, like delete: this throws away typing.
+      dis.onclick = function () {
+        if (!armed) {
+          armed = 1; dis.textContent = 'sure?';
+          armTimer = setTimeout(function () { armed = 0; dis.textContent = 'discard'; }, 4000);
+          return;
+        }
+        clearTimeout(armTimer); armed = 0; dis.textContent = 'discard';
+        discardEdits();
+        toast('edits discarded', true);
+      };
+      editBar.querySelector('.__send').onclick = sendEdits;
+      editBar.querySelector('.__x').onclick = function () { setEditMode(false); };
+    }
+    var badge = editBar.querySelector('.__badge');
+    badge.textContent = editMode ? 'EDITING' : 'UNSENT';
+    badge.classList.toggle('__off', !editMode);
+    editBar.querySelector('.__n').textContent = sendingEdits ? 'sending…' :
+      (n ? n + (n === 1 ? ' block changed' : ' blocks changed')
+         : 'click any text and type');
+    editBar.querySelector('.__send').disabled = !n || sendingEdits;
+    editBar.querySelector('.__discard').disabled = !n || sendingEdits;
+    editBar.querySelector('.__x').style.display = editMode ? '' : 'none';
+  }
+
+  // Unsent typing is the one thing here a reload destroys.
+  window.addEventListener('beforeunload', function (e) {
+    if (pendingEdits().length) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // Word-level diff of two strings, as [{op, text}] with op equal, delete or
+  // insert. Joining equal+delete gives the old text, equal+insert the new.
+  function diffWords(a, b) {
+    var A = a.match(/\s+|[^\s]+/g) || [], B = b.match(/\s+|[^\s]+/g) || [];
+    var pre = 0;
+    while (pre < A.length && pre < B.length && A[pre] === B[pre]) pre++;
+    var suf = 0;
+    while (suf < A.length - pre && suf < B.length - pre &&
+           A[A.length - 1 - suf] === B[B.length - 1 - suf]) suf++;
+    var a2 = A.slice(pre, A.length - suf), b2 = B.slice(pre, B.length - suf);
+    var n = a2.length, m = b2.length, ops = [];
+    var put = function (op, t) { ops.push({ op: op, text: t }); };
+    if (pre) put('equal', A.slice(0, pre).join(''));
+    if (n * m > 4000000) {
+      if (n) put('delete', a2.join(''));
+      if (m) put('insert', b2.join(''));
+    } else {
+      var L = [], i, j;
+      for (i = 0; i <= n; i++) L.push(new Uint32Array(m + 1));
+      for (i = n - 1; i >= 0; i--)
+        for (j = m - 1; j >= 0; j--)
+          L[i][j] = a2[i] === b2[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+      i = 0; j = 0;
+      while (i < n && j < m) {
+        if (a2[i] === b2[j]) { put('equal', a2[i]); i++; j++; }
+        else if (L[i + 1][j] >= L[i][j + 1]) { put('delete', a2[i]); i++; }
+        else { put('insert', b2[j]); j++; }
+      }
+      while (i < n) put('delete', a2[i++]);
+      while (j < m) put('insert', b2[j++]);
+    }
+    if (suf) put('equal', A.slice(A.length - suf).join(''));
+    // Fold a run of changes into one delete then one insert, swallowing the
+    // single spaces between changed words, so "big red" -> "small blue" reads
+    // as one replacement rather than four fragments.
+    var out = [], del = '', ins = '';
+    function flush() {
+      if (del) out.push({ op: 'delete', text: del });
+      if (ins) out.push({ op: 'insert', text: ins });
+      del = ins = '';
+    }
+    for (var k = 0; k < ops.length; k++) {
+      var o = ops[k];
+      if (o.op === 'equal') {
+        if ((del || ins) && /^\s+$/.test(o.text) && ops[k + 1] && ops[k + 1].op !== 'equal') {
+          del += o.text; ins += o.text; continue;
+        }
+        flush();
+        var last = out[out.length - 1];
+        if (last && last.op === 'equal') last.text += o.text; else out.push({ op: 'equal', text: o.text });
+      } else if (o.op === 'delete') del += o.text;
+      else ins += o.text;
+    }
+    flush();
+    return out;
+  }
+
+  // Compact old -> new for the drawer: changes in full, long unchanged runs
+  // cut to a few words of context either side.
+  function renderDiff(ops) {
+    var wrap = document.createElement('span'), K = 4;
+    function gap() {
+      var g = document.createElement('span'); g.className = '__gap'; g.textContent = ' … ';
+      wrap.appendChild(g);
+    }
+    (ops || []).forEach(function (o, i) {
+      if (o.op === 'delete' || o.op === 'insert') {
+        var x = document.createElement(o.op === 'delete' ? 'del' : 'ins');
+        x.textContent = o.text;
+        wrap.appendChild(x);
+        return;
+      }
+      var w = o.text.split(/\s+/).filter(Boolean);
+      var first = i === 0, lastOp = i === ops.length - 1;
+      if (w.length <= K * 2 + 1) { wrap.appendChild(document.createTextNode(o.text)); return; }
+      var lead = /^\s/.test(o.text) ? ' ' : '', trail = /\s$/.test(o.text) ? ' ' : '';
+      if (!first) wrap.appendChild(document.createTextNode(lead + w.slice(0, K).join(' ')));
+      gap();
+      if (!lastOp) wrap.appendChild(document.createTextNode(w.slice(-K).join(' ') + trail));
+    });
+    return wrap;
+  }
 
   // Right-click is left alone entirely. It used to open a comment whenever
   // text was selected, which is precisely when Copy and Search are wanted, so
@@ -1010,8 +1484,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         self.outdir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        # Every record says what it is. Edits (typed over the page in edit
+        # mode) carry old_text/new_text instead of a comment; anything that
+        # does not say is a comment, which is what every older record is.
+        data.setdefault("type", "comment")
         # A slug from the comment makes the directory readable at a glance.
-        slug = re.sub(r"[^a-z0-9]+", "-", data.get("comment", "")[:40].lower()).strip("-") or "note"
+        label = data.get("comment") or ""
+        if data.get("type") == "edit":
+            label = "edit " + (data.get("new_text") or "")
+        slug = re.sub(r"[^a-z0-9]+", "-", label[:40].lower()).strip("-") or "note"
         path = self.outdir / f"{stamp}-{slug}.json"
         i = 2
         while path.exists():
@@ -1043,7 +1524,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 pass
         path.write_text(json.dumps(data, indent=2))
-        sys.stderr.write(f"  annotation → {path.name}: {data.get('comment','')[:70]}\n")
+        sys.stderr.write(f"  annotation → {path.name}: {label[:70]}\n")
 
         # Saving always works. Sending additionally wakes the agent now, so the
         # comment does not sit unread until something else happens to run.
@@ -1058,8 +1539,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             sys.stderr.write(f"  send → {'delivered' if delivered else 'NOT delivered: ' + why}\n")
             agent = agent or self.target_name
 
+        # The filename lets the overlay save several records and then deliver
+        # them as one batch through ?action=send, which edit mode does.
         raw = json.dumps({"ok": True, "delivered": delivered, "queued": queued,
-                          "why": why, "agent": agent}).encode()
+                          "why": why, "agent": agent, "file": path.name}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self._cors()
@@ -1266,7 +1749,7 @@ def _deliver(served_dir, outdir, n, files=None, hook=None):
     return False, why, None
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 STARTED = time.time()
 # Snapshot at import. Comparing the running file's CURRENT mtime against the
@@ -1437,7 +1920,7 @@ def main():
             if Handler.on_send else "  comments are collected only, nobody will be woken")
         if Handler.on_send:
             _drain_queue(Handler.served_dir, outdir, Handler.on_send, Handler.target_name)
-        say("  select text + A, option-click (\u2325) anything, or shift-drag a box. ctrl-c to stop.")
+        say("  select text + A, option-click (\u2325) anything, or shift-drag a box. E edits text. ctrl-c to stop.")
         if a.bookmarklet:
             # For a page this server does not serve. Works where the site's CSP
             # allows an injected script; strict script-src (GitHub, most banks)

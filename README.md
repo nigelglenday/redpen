@@ -42,6 +42,9 @@ open http://localhost:8801/report.html
   the text being reviewed is worse than no pin at all.
 - **A sidebar** grouping comments by page, with open and processed counts, and
   who the comments are going to.
+- **Edit the text itself.** Press `E`, click any paragraph and type over it.
+  For wording, a rewrite says it better than a comment describing one. See
+  [Edit mode](#edit-mode).
 - **Process in batches.** Comment as you read, then send the lot. Or one at a
   time from its row.
 - **Nothing is pushed on you.** The page never reloads itself. When work comes
@@ -68,6 +71,53 @@ One JSON file per comment, next to the files being served:
 `source_file` is the point. An agent should not have to map `/report.html` back
 to somewhere on disk, because getting that wrong means editing the wrong copy
 when a build directory, a published mirror and a repo all hold that filename.
+
+Every record has a `type`. A comment is `"comment"` (records written before
+0.2.0 have no `type`; treat that as a comment). An edit from
+[Edit mode](#edit-mode) is `"edit"` and carries the text before and after
+instead of a comment:
+
+```json
+{
+  "type": "edit",
+  "old_text": "Current state. Shipment updates arrive by email and are reconciled by hand every Friday.",
+  "new_text": "Current state. Shipment updates arrive by email and are reconciled in a spreadsheet every Friday.",
+  "diff": [
+    { "op": "equal",  "text": "Current state. Shipment updates arrive by email and are reconciled " },
+    { "op": "delete", "text": "by hand" },
+    { "op": "insert", "text": "in a spreadsheet" },
+    { "op": "equal",  "text": " every Friday." }
+  ],
+  "selector": "#exec-summary > p:nth-of-type(1)",
+  "element_html": "<p><b>Current state.</b> Shipment updates arrive by email and are reconciled by hand every Friday.</p>",
+  "new_html": "<p><b>Current state.</b> Shipment updates arrive by email and are reconciled in a spreadsheet every Friday.</p>",
+  "document": "/report.html",
+  "source_file": "/Users/you/project/build/report.html",
+  "agent": "report-writer",
+  "rect": { "x": 164, "y": 210, "w": 618, "h": 52 },
+  "at": "2026-11-03T21:07:35Z"
+}
+```
+
+`element_html` is the block as it was before the edit, `new_html` as it was
+sent. `diff` is word level: joining the `equal` and `delete` parts gives
+`old_text`, joining `equal` and `insert` gives `new_text`.
+
+**Applying an edit.** The served page is usually built from something else, so
+an edit to the HTML on disk gets overwritten by the next build. Apply it to the
+source:
+
+1. Find the block in the source (HTML, Markdown or the script that generates
+   the page) by fragments of `old_text`, using `element_html` to tell apart two
+   blocks with similar wording.
+2. Change it to read as `new_text`, keeping the inline markup that survived the
+   edit: a bold lead-in, a link, emphasis. `new_html` shows which of it did.
+3. Rebuild whatever is being served, show the result (a redline, old struck and
+   new underlined, is the quickest way to review a set of edits), and move the
+   file to `done/`.
+4. If you cannot place an edit with confidence, do not guess. Reply on the
+   thread (append to `replies`, move it to `answered/`) and say what you could
+   not find.
 
 **State is the filesystem, not a protocol.** Three directories, and `ls` tells
 you where a comment stands:
@@ -106,6 +156,38 @@ a new comment.
 It stops there on purpose. Reply and reopen is a review loop; anything more is a
 chat client, which this is not.
 
+## Edit mode
+
+For wording, a comment is the long way round. *"Change 'by hand' to 'in a
+spreadsheet'"* is a description of an edit; typing it is the edit. Edit mode is
+suggesting mode for a served page:
+
+1. Press `E`, or click the **edit text** tab under the comments tab. An
+   **EDITING** bar appears at the top of the page.
+2. Click any text. Its block (a paragraph, list item, heading, table cell,
+   quote, caption) gets a cursor where you clicked. Delete, retype, select a
+   phrase and type over it. Paste is plain text only. Enter is a line break,
+   not a new paragraph.
+3. Edit as many blocks as you like. Changed ones are tinted so you can see what
+   you touched. A block you put back exactly as it was is not an edit.
+4. **send edits** (or `⌘ enter`) saves one record per changed block and
+   delivers them together, exactly like processing a batch of comments. Sent
+   blocks turn green and edit mode stays on. **discard** (click twice) puts
+   every unsent block back as it was.
+5. `esc`, `E` again (outside a block) or the `×` on the bar leaves edit mode.
+   Unsent edits stay on the page and in the bar until you send or discard them.
+
+While editing, links do not navigate, pins do not take clicks, and the comment
+gestures (`A`, shift-drag) are off, so a click always means "put the cursor
+here". Edits show in the drawer next to comments, old text struck and new text
+underlined, and delete the same way.
+
+The page itself is never saved. The edit goes to the agent, which changes the
+source and rebuilds; see [Applying an edit](#what-an-agent-receives).
+
+Edits are per block. Merging two paragraphs or moving a sentence between them
+is out of scope; say that in a comment.
+
 ## Telling an agent about it
 
 redpen does not know who should act on a comment, and deliberately does not
@@ -133,6 +215,10 @@ nothing. That is how the sidebar can say *goes to report-writer* before you send
 anything.
 
 See [`examples/deliver-tmux`](examples/deliver-tmux) for a working one.
+
+Whatever your hook says to the agent, it should cover both record types: a
+`comment` is an instruction or a question, an `edit` is new wording to apply to
+the source as described under [Applying an edit](#what-an-agent-receives).
 
 **The overlay never prints.** A PDF of the page is the deliverable; the tab,
 drawer and pins are scaffolding for reviewing it. If you script the print,
@@ -178,9 +264,11 @@ There is deliberately no `overlay.js` in this repo. redpen is one file you can
 | shift-drag | comment on a region |
 | `enter` | save it and keep reading, or send a reply on an answered thread |
 | `⌥ enter` | save and process it now |
-| `esc` | cancel |
+| `esc` | cancel, or leave edit mode |
+| `E` | edit mode on or off |
+| `⌘ enter` | in edit mode, send edits |
 
-One modifier for the whole tool. Nothing needs two.
+One modifier for commenting. Nothing needs two.
 
 ## Install
 
