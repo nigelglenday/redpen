@@ -240,7 +240,14 @@ redpen <dir> --local             bind 127.0.0.1 instead of the LAN address
 redpen <dir> --no-send           collect comments, wake nobody
 redpen --bookmarklet             the overlay for a page you do not serve
 redpen --overlay                 print the overlay JavaScript, for vendoring
+redpen <dir> --idle-hours 4      stop after 4 hours unused (default 24; 0 = never)
 ```
+
+**A server stops itself after 24 hours unused.** A page load, a comment or an edit
+counts as use; the overlay's 10-second background poll does not, so a tab left open
+does not keep it alive. It waits while comments are still queued for delivery.
+Agents start one per page and rarely stop it: on one machine 45 had piled up, some
+days old. Start it again with the same command when it is needed.
 
 ### Vendoring the overlay
 
