@@ -1536,6 +1536,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     target_name = None  # who that reaches, shown in the drawer
     proxy = None   # when set, serve someone else's app and inject into its HTML
 
+    def handle_one_request(self):
+        # Every request counts as use except the overlay's own 10-second poll:
+        # a tab left open for a week would otherwise keep the server alive
+        # forever, which is how 45 of them piled up on the M3 (toolkit#36).
+        global LAST_USE
+        super().handle_one_request()
+        path = getattr(self, "path", "") or ""
+        if path and not path.startswith("/__annotate?action=list"):
+            LAST_USE = time.time()
+
     def log_message(self, fmt, *args):  # quieter than the default
         # args[0] is not always a string: log_error passes an HTTPStatus.
         first = str(args[0]) if args else ""
@@ -1974,9 +1984,10 @@ def _deliver(served_dir, outdir, n, files=None, hook=None):
     return False, why, None
 
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 STARTED = time.time()
+LAST_USE = STARTED   # last request that was not the overlay's background poll
 # Snapshot at import. Comparing the running file's CURRENT mtime against the
 # installed binary's current mtime compares a file to itself and can never
 # fire, which is what the first version did.
@@ -2039,6 +2050,25 @@ def _drain_queue(served_dir, outdir, hook, target):
     threading.Thread(target=loop, daemon=True).start()
 
 
+def _idle_exit(httpd, hours):
+    """Stop the server after `hours` with no use, so forgotten ones go away.
+
+    Agents start a redpen per page and rarely stop it; on the M3 they piled up
+    to 45 processes, some days old (toolkit#36). Waits while comments are
+    queued for delivery, so nothing he sent is dropped."""
+    import threading
+
+    def loop():
+        while True:
+            time.sleep(min(60, max(1, hours * 900)))
+            if time.time() - LAST_USE >= hours * 3600 and not _QUEUE:
+                print(f"  idle {hours:g} h, stopping", flush=True)
+                httpd.shutdown()
+                return
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Serve a directory with an annotation overlay.")
     ap.add_argument("directory", nargs="?", default=".",
@@ -2065,6 +2095,9 @@ def main():
                     help="collect comments only; do not wake anyone")
     ap.add_argument("--overlay", action="store_true",
                     help="print the overlay JavaScript to stdout and exit, for vendoring")
+    ap.add_argument("--idle-hours", type=float, default=24, metavar="H",
+                    help="stop after H hours with no page load or comment "
+                         "(default 24; the overlay's background poll does not count; 0 = never)")
     ap.add_argument("--version", action="version", version=f"redpen {VERSION}")
     ap.add_argument("--to", default=None, metavar="NAME",
                     help="who comments reach, shown in the drawer")
@@ -2158,6 +2191,8 @@ def main():
                   f"document.body.appendChild(s);}})();")
             say()
             say(f"  it posts back to localhost:{a.port}, so keep `peek {a.port}` open.")
+        if a.idle_hours > 0:
+            _idle_exit(httpd, a.idle_hours)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
