@@ -3,6 +3,17 @@
 All notable changes to redpen. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-20
+
+### Fixed
+- **Typing A or E in a text box no longer fires a shortcut** (redpen#5). Compass's reply slip
+  puts its text box in a shadow root, so the keydown target was the host element and the text-box
+  check missed it. The check now reads the real target (`composedPath()[0]`).
+
+### Changed
+- **The shortcuts need Ctrl: Ctrl+A comments on the selected text, Ctrl+E toggles edit mode.**
+  Plain A and E now always type. Nigel asked for this on 20 Nov.
+
 ## [0.4.1] - 2026-11-20
 
 ### Fixed

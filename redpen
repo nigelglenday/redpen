@@ -21,9 +21,9 @@ Binds 127.0.0.1 by default: the page material and your comments stay on the mach
 serving them, which is the machine the agent is on, so nothing is copied back.
 
 Interactions:
-  - Select text, then press A (or right-click) to comment on the selection.
+  - Select text, then press Ctrl+A (or right-click) to comment on the selection.
   - Hold Shift and drag to lasso a region, then comment on what it covers.
-  - Press E for edit mode: click any text and type over it, then send edits.
+  - Press Ctrl+E for edit mode: click any text and type over it, then send edits.
     Each changed block is saved with its old and new text, like a comment.
   - Esc cancels.
 """
@@ -449,7 +449,7 @@ OVERLAY = r"""
     editTab = document.createElement('button');
     editTab.className = '__ann-edittab' + (editMode ? ' __on' : '');
     editTab.textContent = 'edit text';
-    editTab.title = 'edit mode: click any text and type over it (E)';
+    editTab.title = 'edit mode: click any text and type over it (Ctrl+E)';
     editTab.onclick = function () { setEditMode(!editMode); };
     document.body.appendChild(editTab);
 
@@ -825,7 +825,8 @@ OVERLAY = r"""
     commentOnElement(el, e.clientX, e.clientY);
   }, true);
 
-  // Text selection -> press A. E toggles edit mode.
+  // Text selection -> Ctrl+A. Ctrl+E toggles edit mode. Never while focus is in a text box, including
+  // one inside a shadow root (Compass's reply slip), where e.target is only the host (redpen#5).
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       if (modal) { closeModal(); return; }
@@ -837,9 +838,11 @@ OVERLAY = r"""
       closeModal(); return;
     }
     if (modal) return;
-    var tag = (e.target.tagName || '').toLowerCase();
-    var typing = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
-    if ((e.key === 'e' || e.key === 'E') && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    var t = (e.composedPath && e.composedPath()[0]) || e.target;
+    var tag = (t.tagName || '').toLowerCase();
+    var typing = tag === 'input' || tag === 'textarea' || tag === 'select' || !!t.isContentEditable;
+    var ctrlOnly = e.ctrlKey && !e.metaKey && !e.altKey;
+    if ((e.key === 'e' || e.key === 'E') && !typing && ctrlOnly) {
       e.preventDefault();
       setEditMode(!editMode);
       return;
@@ -849,7 +852,7 @@ OVERLAY = r"""
     }
     if (editMode) return;                       // no A-comments while editing
     if (e.key !== 'a' && e.key !== 'A') return;
-    if (typing) return;
+    if (typing || !ctrlOnly) return;
     var sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
     e.preventDefault();
@@ -1988,7 +1991,7 @@ def _deliver(served_dir, outdir, n, files=None, hook=None):
     return False, why, None
 
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 STARTED = time.time()
 LAST_USE = STARTED   # last request that was not the overlay's background poll
