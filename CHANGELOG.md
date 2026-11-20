@@ -3,6 +3,16 @@
 All notable changes to redpen. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-20
+
+### Fixed
+- **The tailnet address is found without ifconfig.** Ubuntu ships no `ifconfig`, so on
+  Stonehenge (the M3's Linux replacement) redpen could not find the address to bind to.
+  It now asks `ip -4 -o addr show tailscale0` first, then `tailscale ip -4` (not on a Mac,
+  where the CLI can print a GUI error and exit 0), then `ifconfig` as before. Every answer
+  must be a Tailscale address (100.64.0.0/10). Unit tests in `tests/test_tailnet_ip.py`
+  (`python3 -m unittest discover tests`). redpen#2.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added

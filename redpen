@@ -1988,7 +1988,7 @@ def _deliver(served_dir, outdir, n, files=None, hook=None):
     return False, why, None
 
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 STARTED = time.time()
 LAST_USE = STARTED   # last request that was not the overlay's background poll
@@ -1998,22 +1998,50 @@ LAST_USE = STARTED   # last request that was not the overlay's background poll
 SRC_MTIME = os.path.getmtime(__file__)
 
 
-def tailnet_ip():
-    """This machine's tailnet address, read off the interface.
-
-    Not from the Tailscale CLI: under a stripped environment that exits 0 and
-    prints "The Tailscale GUI failed to start" to stdout, so the failure
-    arrives looking exactly like an answer.
-    """
-    import re as _re, subprocess as _sp
-    try:
-        out = _sp.run(["/sbin/ifconfig"], capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return None
-    for m in _re.finditer(r"inet (100\.\d{1,3}\.\d{1,3}\.\d{1,3})", out):
+def _cgnat_ips(text):
+    """Tailscale addresses (100.64.0.0/10) in command output, in order."""
+    ips = []
+    for m in re.finditer(r"(?<![\d.])(100\.\d{1,3}\.\d{1,3}\.\d{1,3})(?![\d.])", text or ""):
         ip = m.group(1)
         if 64 <= int(ip.split(".")[1]) <= 127:   # Tailscale's CGNAT range
-            return ip
+            ips.append(ip)
+    return ips
+
+
+def _run_out(argv):
+    import subprocess as _sp
+    try:
+        return _sp.run(argv, capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+
+
+def tailnet_ip(run=_run_out, which=shutil.which, platform=sys.platform):
+    """This machine's tailnet address.
+
+    Tried in order, first answer wins:
+      1. `ip -4 -o addr show tailscale0` (Linux; Ubuntu ships no ifconfig).
+      2. `tailscale ip -4`, but not on a Mac: there, under a stripped
+         environment, the CLI exits 0 and prints "The Tailscale GUI failed to
+         start" to stdout, so the failure looks exactly like an answer. Its
+         output is checked against the CGNAT range either way.
+      3. `ifconfig` (the Mac), from PATH or /sbin.
+    """
+    ip_bin = which("ip")
+    if ip_bin:
+        found = _cgnat_ips(run([ip_bin, "-4", "-o", "addr", "show", "tailscale0"]))
+        if found:
+            return found[0]
+    ts_bin = which("tailscale")
+    if ts_bin and platform != "darwin":
+        found = _cgnat_ips(run([ts_bin, "ip", "-4"]))
+        if found:
+            return found[0]
+    ifc = which("ifconfig") or ("/sbin/ifconfig" if os.path.exists("/sbin/ifconfig") else None)
+    if ifc:
+        found = _cgnat_ips("\n".join(l for l in run([ifc]).splitlines() if "inet " in l))
+        if found:
+            return found[0]
     return None
 
 
