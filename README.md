@@ -33,7 +33,7 @@ open http://localhost:8801/report.html
 
 ## What you get
 
-- **Comment on anything.** Select text and press `A`, `⌥`-click any element, or
+- **Comment on anything.** Select text and press `Ctrl+A`, `⌥`-click any element, or
   shift-drag a box. Commenting on a *place* matters as much as on words: "add a
   bullet here" has nothing to highlight.
 - **Pins in the left gutter**, numbered, anchored by CSS selector so they survive
@@ -42,7 +42,7 @@ open http://localhost:8801/report.html
   the text being reviewed is worse than no pin at all.
 - **A sidebar** grouping comments by page, with open and processed counts, and
   who the comments are going to.
-- **Edit the text itself.** Press `E`, click any paragraph and type over it.
+- **Edit the text itself.** Press `Ctrl+E`, click any paragraph and type over it.
   For wording, a rewrite says it better than a comment describing one. See
   [Edit mode](#edit-mode).
 - **Process in batches.** Comment as you read, then send the lot. Or one at a
@@ -162,7 +162,7 @@ For wording, a comment is the long way round. *"Change 'by hand' to 'in a
 spreadsheet'"* is a description of an edit; typing it is the edit. Edit mode is
 suggesting mode for a served page:
 
-1. Press `E`, or click the **edit text** tab under the comments tab. An
+1. Press `Ctrl+E`, or click the **edit text** tab under the comments tab. An
    **EDITING** bar appears at the top of the page.
 2. Click any text. Its block (a paragraph, list item, heading, table cell,
    quote, caption) gets a cursor where you clicked. Delete, retype, select a
@@ -179,11 +179,11 @@ suggesting mode for a served page:
    delivers them together, exactly like processing a batch of comments. Sent
    blocks turn green and edit mode stays on. **discard** (click twice) puts
    every unsent block back as it was.
-5. `esc`, `E` again (outside a block) or the `×` on the bar leaves edit mode.
+5. `esc`, `Ctrl+E` again (outside a block) or the `×` on the bar leaves edit mode.
    Unsent edits stay on the page and in the bar until you send or discard them.
 
 While editing, links do not navigate, pins do not take clicks, and the comment
-gestures (`A`, shift-drag) are off, so a click always means "put the cursor
+gestures (`Ctrl+A`, shift-drag) are off, so a click always means "put the cursor
 here". Edits show in the drawer next to comments, old text struck and new text
 underlined, and delete the same way.
 
@@ -276,13 +276,13 @@ There is deliberately no `overlay.js` in this repo. redpen is one file you can
 
 | key | |
 |---|---|
-| `A` | comment on selected text |
+| `Ctrl+A` | comment on selected text |
 | `⌥` click | comment on the selection, or on the element under the cursor |
 | shift-drag | comment on a region |
 | `enter` | save it and keep reading, or send a reply on an answered thread |
 | `⌥ enter` | save and process it now |
 | `esc` | cancel, or leave edit mode |
-| `E` | edit mode on or off |
+| `Ctrl+E` | edit mode on or off |
 | `⌘ enter` | in edit mode, send edits |
 
 One modifier for commenting. Nothing needs two.
