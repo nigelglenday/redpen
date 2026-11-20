@@ -830,6 +830,10 @@ OVERLAY = r"""
     if (e.key === 'Escape') {
       if (modal) { closeModal(); return; }
       if (editMode) { setEditMode(false); return; }
+      if (box) { closeModal(); return; }
+      // Nothing of ours is open. In a frame (Compass's Catch up shows the page beside a card), tell the page
+      // around it, which cannot hear keys pressed in here, so it can take the keyboard back.
+      if (window.parent !== window) { try { window.parent.postMessage({ redpen: 'escape' }, '*'); } catch (_) {} }
       closeModal(); return;
     }
     if (modal) return;
@@ -1984,7 +1988,7 @@ def _deliver(served_dir, outdir, n, files=None, hook=None):
     return False, why, None
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 STARTED = time.time()
 LAST_USE = STARTED   # last request that was not the overlay's background poll

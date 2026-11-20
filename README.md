@@ -249,6 +249,11 @@ does not keep it alive. It waits while comments are still queued for delivery.
 Agents start one per page and rarely stop it: on one machine 45 had piled up, some
 days old. Start it again with the same command when it is needed.
 
+**Pages can be shown in a frame.** redpen sends no X-Frame-Options or frame-ancestors, so
+another page (Compass's Catch up) can show a redpen page inside it, comments and all. Keys
+pressed in the frame never reach the page around it, so Esc, with nothing of redpen's
+open, posts `{redpen: 'escape'}` to the parent window for it to take the keyboard back.
+
 ### Vendoring the overlay
 
 If you are serving the overlay from your own application rather than from

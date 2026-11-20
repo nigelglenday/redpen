@@ -3,6 +3,16 @@
 All notable changes to redpen. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-20
+
+### Added
+- **Esc inside a framed page reaches the page around it.** When a redpen page is shown
+  inside another page (Compass's Catch up shows the card's page beside the card) and no
+  comment box, drag box or edit mode is open, Esc posts `{redpen: 'escape'}` to the parent
+  window, so the parent can take the keyboard back. A page not in a frame is unchanged.
+  redpen pages already allow framing (no X-Frame-Options or frame-ancestors).
+  atlas-tools#128.
+
 ## [0.3.0] - 2026-11-19
 
 ### Added
